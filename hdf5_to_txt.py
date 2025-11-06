@@ -8,13 +8,15 @@ import h5py
 
 
 
-def time_to_txtfile(sim_h5):
+def time_to_txtfile(GW_result_path):
     with h5py.File(GW_result_path, 'r') as f:
-        t = f['sim.h5/iter11/Selfenergy/mesh'][:]
+        t = f['/iter11/Selfenergy/mesh'][:]
     f.close()
     with open('time_intervals.txt', 'w') as f:
-        f.write(t)
+        f.write(str(t))
     f.close()
 
 if __name__ == '__main__':
     GW_result_path = '/home/orit/VS_codes1/green-mbtools/tests/test_data/H2_GW/sim.h5'
+    time_to_txtfile(GW_result_path)
+    
