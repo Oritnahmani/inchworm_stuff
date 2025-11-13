@@ -13,10 +13,9 @@ def time_to_txtfile(GW_result_path):
         t = f['/iter11/Selfenergy/mesh'][:]
     f.close()
     with open('time_intervals.txt', 'w') as f:
-        f.write(str(t))
+        f.write(str(t/t[-1]))
     f.close()
 
 if __name__ == '__main__':
     GW_result_path = '/home/orit/VS_codes1/green-mbtools/tests/test_data/H2_GW/sim.h5'
     time_to_txtfile(GW_result_path)
-    
