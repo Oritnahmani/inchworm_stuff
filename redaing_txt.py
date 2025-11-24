@@ -12,8 +12,17 @@ def read_array_from_txt(number_of_orbitals):
     data = np.array
     for i in range(number_of_orbitals):
         for j in range(number_of_orbitals):
-            data = np.loadtxt(f'/home/orit/VS_codes1/example/G_{i}_{j}.dat')
-    return data
+            # data = np.loadtxt(f'/home/orit/VS_codes1/example/G_{i}_{j}.dat')
+            times = []
+            with open(f'/home/orit/VS_codes1/example/G_{i}_{j}.dat') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    t_str, ij_str = line.split()            # split into 2 parts
+                    t = float(t_str)
+                    times.append(t)
+    return times
 
 
 
@@ -22,4 +31,5 @@ if __name__ == '__main__':
     # for i in range(number_of_orbitals):
     #     for j in range(number_of_orbitals):
     # filename = f'/home/orit/VS_codes1/example/G_{i}_{j}.dat'
-    
+    times = read_array_from_txt(number_of_orbitals)
+    print(times)
