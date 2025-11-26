@@ -19,7 +19,7 @@ def read_greenfunction_from_txt(number_of_orbitals, time_filename):
             t_list.append(float(t_str))
     t_arr = np.array(t_list)    
     t_shape = len(t_arr)
-    green_tau = np.zeros((t_shape, number_of_orbitals, number_of_orbitals))
+    green_tau = np.zeros((t_shape, number_of_orbitals, number_of_orbitals), dtype=complex)
     for i in range(number_of_orbitals):
         for j in range(number_of_orbitals):
             # data = np.loadtxt(f'/home/orit/VS_codes1/example/G_{i}_{j}.dat')
@@ -35,17 +35,23 @@ def read_greenfunction_from_txt(number_of_orbitals, time_filename):
 
 
 def read_delta_tau_from_txt(delta_file,t_arr,number_of_orbitals):
-    delta_tau = np.zeros((t_arr.shape[0],number_of_orbitals, number_of_orbitals))
+    delta_tau = np.zeros((t_arr.shape[0],number_of_orbitals, number_of_orbitals), dtype=complex)
     with open(delta_file) as k:
-        for line in k:
-            line = line.strip()
+        for raw_line in k:
+            line = raw_line.strip()
             if not line or line.startswith("#"):
                 continue
-            for l in range(t_arr.shape[0]):
-                for i in range(number_of_orbitals):
-                    for j in range(number_of_orbitals):
-                            l , i , j , ij_str_re , ij_str_im = line.split()
-                            delta_tau[l, int(i), int(j)] = complex(ij_str_re + ij_str_im)
+            # parts = line.split()
+
+            # for l in range(t_arr.shape[0]):
+            #     for i in range(number_of_orbitals):
+            #         for m in range(number_of_orbitals):
+            l_str, i_str, m_str, ij_str_re, ij_str_im = line.split()
+            # l_str , i_str , m_str , ij_str_re , ij_str_im = line.split()
+            l = int(l_str)
+            i = int(i_str)
+            m = int(m_str)
+            delta_tau[l, int(i), int(m)] = complex(float(ij_str_re) + 1j * float(ij_str_im))
     return delta_tau
 
 # def fourier_trans_for_all(delta_tau,green_tau):
@@ -63,6 +69,6 @@ if __name__ == '__main__':
     delta_file = '/home/orit/VS_codes1/example/delta.txt'
     green_tau, t_arr = read_greenfunction_from_txt(number_of_orbitals, time_filename)
     delta_tau = read_delta_tau_from_txt(delta_file, t_arr, number_of_orbitals)
-    print(delta_tau)
+    print(delta_tau.shape)
     # print(t_arr.shape)
     # print(green_tau)
