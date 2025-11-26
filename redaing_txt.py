@@ -9,26 +9,29 @@ from mbanalysis import ir
 
 
 def read_greenfunction_from_txt(number_of_orbitals, time_filename):
+    t_list = []
     with open(time_filename) as k:
         for line in k:
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
             t_str, ij_str = line.split()
-            t_shape = len(t_str)
-    green = np.zeros((t_shape, number_of_orbitals, number_of_orbitals))
+            t_list.append(float(t_str))
+    t_arr = np.array(t_list)    
+    t_shape = len(t_arr)
+    green_tau = np.zeros((t_shape, number_of_orbitals, number_of_orbitals))
     for i in range(number_of_orbitals):
         for j in range(number_of_orbitals):
             # data = np.loadtxt(f'/home/orit/VS_codes1/example/G_{i}_{j}.dat')
-            times = []
             with open(f'/home/orit/green_fun/inchworm/example/G_{i}_{j}.dat') as f:
                 for line in f:
                     line = line.strip()
                     if not line or line.startswith("#"):
                         continue
                     t_str, ij_str = line.split()            # split into 2 parts
-                    green[:, i, j] = np.array([complex(x) for x in ij_str.strip().split(',')])
-    return green_tau
+                    # TODO mabey there is a problem
+                    green_tau[:, i, j] = np.array([complex(x) for x in ij_str.strip().split(',')])
+    return green_tau, t_arr
 
 def read_delta_tau_from_txt(delta_file):
     delta_tau = np.zeros((number_of_orbitals, number_of_orbitals))
@@ -41,7 +44,7 @@ def read_delta_tau_from_txt(delta_file):
             delta_tau[int(i), int(j)] = complex(ij_str)
     return delta_tau
 
-def fourier_trans_for_all(delta_tau,green_tau):
+# def fourier_trans_for_all(delta_tau,green_tau):
     
 
            
@@ -54,6 +57,7 @@ if __name__ == '__main__':
     #     for j in range(number_of_orbitals):
     time_filename = f'/home/orit/green_fun/inchworm/example/G_{0}_{0}.dat'
     delta_file = '/home/orit/green_fun/inchworm/example/delta.txt'
-    green = read_greenfunction_from_txt(number_of_orbitals, time_filename)
+    green_tau, t_arr = read_greenfunction_from_txt(number_of_orbitals, time_filename)
     # delta_tau = read_delta_tau_from_txt(time_filename)
-    # print(green)
+    print(t_arr.shape)
+    print(green_tau)
