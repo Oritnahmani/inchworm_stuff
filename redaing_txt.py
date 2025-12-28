@@ -23,7 +23,7 @@ def read_greenfunction_from_txt(number_of_orbitals, time_filename):
     for i in range(number_of_orbitals):
         for j in range(number_of_orbitals):
             # data = np.loadtxt(f'/home/orit/VS_codes1/example/G_{i}_{j}.dat')
-            with open(f'/home/orit/VS_codes1/example/G_{i}_{j}.dat') as f:
+            with open(f'/home/orit/VS_codes1/data_analyzing_from_mbpt/G_{i}_{j}.dat') as f:
                 for line in f:
                     line = line.strip()
                     if not line or line.startswith("#"):
