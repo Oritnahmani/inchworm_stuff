@@ -15,7 +15,8 @@ def read_greenfunction_from_txt(number_of_orbitals, time_filename):
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-            t_str, ij_str = line.split()
+            # t_str, ij_str = line.split()
+            t_str = line.strip()
             t_list.append(float(t_str))
     t_arr = np.array(t_list)    
     t_shape = len(t_arr)
