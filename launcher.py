@@ -1,50 +1,61 @@
-#!/usr/bin/env python3
 import argparse
 import subprocess
-import time
 from pathlib import Path
-from typing import Iterable, Tuple
 
 REQUIRED_FILES = ("hopping.txt", "delta.txt", "Uijkl.txt")
 
-SLURM_TEMPLATE = """#!/bin/bash -l
+SEET_TEMPLATE = """#!/bin/bash -l
+#SBATCH --job-name=seet
+#SBATCH --error=error_%j.txt
+#SBATCH --output=output_%j.txt
+#SBATCH --partition=gcohen_2023
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=128
+##SBATCH --cpus-per-task=128
+#SBATCH --time=336:00:00
+#SBATCH --hint=nomultithread
+#SBATCH --exclusive
+#SBATCH --chdir={run_dir}
+
+export OMP_NUM_THREADS=1
+source /gcohenlabstorage/oritnahmani/software/spack_with_Gaurav/spack_init.sh
+ml git
+spack env activate green
+BETA={beta}
+export HDF5_USE_FILE_LOCKING=FALSE
+
+mpirun -n 128  $GREENSEET_ROOT/bin/embedding.exe --scf_type=GW --BETA $BETA --grid_file $GREENSEET_ROOT/share/ir/1e5.h5 --itermax 1 --results_file sim_seet.h5 --weak_results ../mbpt_with_mixining_6/NiO_GW.h5 --embedding_type SEET --mixing_type CDIIS --diis_start 2 --diis_size 5 --mixing_weight 0.3 --jobs SC --seet_input ../init_seet/transform.h5 --bath_file bath.txt --impurity_solver_exec  $GREENSEET_ROOT/seet_solvers/bin/ed_solver --impurity_solver_params " --arpack.NEV=8 --arpack.NCV=20 --lanc.NOMEGA=1000 --FREQ_FILE=$GREENSEET_ROOT/share/ir/1e5.h5 --FREQ_PATH=/fermi/ngrid " --dc_data_prefix "../init_seet/dc_int"  --dc_data_path_prefix "../init_seet/dc_int"  --seet_root_dir "./seet"  --spin_symm true --impurity_solver inchworm
+"""
+
+EQIW_TEMPLATE = """#!/bin/bash -l
 #SBATCH --job-name=eqiw
 #SBATCH -p gcohen_intel
 #SBATCH -o outfile
 #SBATCH -e errfile
 #SBATCH -n 1300
 #SBATCH --exclude=compute-0-16
-#SBATCH --mem={memory}
 #SBATCH --time={walltime}
 #SBATCH --chdir={run_dir}
 
-####  mem="{memory}"
-####  walltime={walltime}
-
-####module load mpi/openmpi-1.10.4 gcc/gcc-7.3.0 python/anaconda_python-3.6.1
-#module load anaconda2   ### be careful anaconda will override modules....
-#module load openmpi/1.10.7 hdf5/1.10.1 fftw/3.3.4
-
-#module load hdf5-1.10.6-gcc-9.1.0-cybjw4a fftw-3.3.8-gcc-9.1.0-jsnca6v
-#export CC=$(which gcc)
-#export CXX=$(which g++)
-#export HDF5_USE_FILE_LOCKING=FALSE
-#EquilibriumInchworm_dir=$HOME/src2/multiorbital/EquilibriumInchworm/
-#EquilibriumInchworm_dir=$HOME/src/multiorbital/EquilibriumInchworm/
 EquilibriumInchworm_dir=/gcohenlabstorage/eeitan/eq_inchworm_from_dolev_2025/EquilibriumInchworm/
 EquilibriumInchworm_bin=$EquilibriumInchworm_dir/build/inchworm
 
 date
-#echo 'SLURM_JOBID=' $SLURM_JOBID
 hostname
 pwd
 
-#module list
-
-#. /a/home/cc/chemist/eeitan/eeitan/venv/bin/activate
 ml purge
 ml git/2.30.2   gnu8/8.3.0   openmpi4/4.1.0  hdf5/1.10.5   fftw/3.3.9  boost/1.71.0   eigen/3.3.9  ALPSCore/2.3.2-master12.06.22  cmake/3.23.2  openblas/0.3.7
 ml
+
+# Safety: wait until SEET has produced the required files (and they're non-empty)
+for f in hopping.txt delta.txt Uijkl.txt; do
+  while [ ! -s "$f" ]; do
+    echo "Waiting for $f ..."
+    sleep 10
+  done
+done
+
 rm -f results.h5
 echo 'Evaluating hybridization...' > execution_log.txt
 
@@ -60,55 +71,14 @@ echo '$EquilibriumInchworm_dir/plot_inch_gf.py'
 python $EquilibriumInchworm_dir/plot_inch_gf.py &
 """
 
-def files_present(paths: Iterable[Path]) -> bool:
-    return all(p.exists() for p in paths)
+def write_text(path: Path, text: str) -> None:
+    path.write_text(text)
+    path.chmod(0o750)
 
-def snapshot(paths: Iterable[Path]) -> Tuple[Tuple[int, int], ...]:
-    """
-    Return (size, mtime_ns) per file. If missing, returns (-1, -1).
-    """
-    out = []
-    for p in paths:
-        try:
-            st = p.stat()
-            out.append((st.st_size, st.st_mtime_ns))
-        except FileNotFoundError:
-            out.append((-1, -1))
-    return tuple(out)
-
-def stable_files(paths: Iterable[Path], checks: int, interval_s: float, require_nonempty: bool) -> bool:
-    """
-    Consider files 'stable' if their (size,mtime) is unchanged across `checks` consecutive snapshots.
-    """
-    last = snapshot(paths)
-    for _ in range(checks):
-        time.sleep(interval_s)
-        cur = snapshot(paths)
-        if cur != last:
-            return False
-        last = cur
-
-    if require_nonempty:
-        for p in paths:
-            try:
-                if p.stat().st_size <= 0:
-                    return False
-            except FileNotFoundError:
-                return False
-    return True
-
-def write_slurm(run_dir: Path, slurm_name: str, memory: str, walltime: str) -> Path:
-    slurm_path = run_dir / slurm_name
-    content = SLURM_TEMPLATE.format(memory=memory, walltime=walltime, run_dir=str(run_dir))
-    slurm_path.write_text(content)
-    # Make it executable (not required for sbatch, but convenient)
-    slurm_path.chmod(0o750)
-    return slurm_path
-
-def sbatch(slurm_path: Path, cwd: Path) -> int:
-    # --parsable returns "12345" or "12345;cluster"
+def sbatch(script: Path, cwd: Path, extra_sbatch_args=None) -> int:
+    extra_sbatch_args = extra_sbatch_args or []
     res = subprocess.run(
-        ["sbatch", "--parsable", str(slurm_path)],
+        ["sbatch", "--parsable", *extra_sbatch_args, str(script)],
         cwd=str(cwd),
         check=True,
         capture_output=True,
@@ -118,50 +88,42 @@ def sbatch(slurm_path: Path, cwd: Path) -> int:
     return int(job_id)
 
 def main():
-    ap = argparse.ArgumentParser(description="Wait for input files, generate slurm script, and sbatch it.")
-    ap.add_argument("--dir", default=".", help="Folder to watch / run in (default: current dir).")
-    ap.add_argument("--memory", required=True, help='Slurm memory, e.g. "64G" or "64000M".')
-    ap.add_argument("--walltime", required=True, help='Slurm time, e.g. "02:00:00" or "2-00:00:00".')
-    ap.add_argument("--slurm-name", default="eqiw.sbatch", help="Output slurm filename.")
-    ap.add_argument("--poll", type=float, default=5.0, help="Polling interval seconds.")
-    ap.add_argument("--stable-checks", type=int, default=2,
-                    help="How many consecutive stable snapshots to require.")
-    ap.add_argument("--stable-interval", type=float, default=2.0,
-                    help="Seconds between stability snapshots.")
-    ap.add_argument("--require-nonempty", action="store_true",
-                    help="Require input files to be non-empty before submitting.")
-    ap.add_argument("--marker", default=".eqiw_submitted",
-                    help="Marker file to prevent re-submitting.")
+    ap = argparse.ArgumentParser(
+        description="Submit SEET job, then submit EQIW job after SEET completes successfully."
+    )
+    ap.add_argument("--run-dir", default=".", help="Directory where both jobs will run / where files are created.")
+    ap.add_argument("--seet-script", default="seet.sbatch", help="Filename for generated SEET sbatch script.")
+    ap.add_argument("--eqiw-script", default="eqiw.sbatch", help="Filename for generated EQIW sbatch script.")
+    ap.add_argument("--beta", default="100", help="Value for BETA in the SEET job.")
+    ap.add_argument("--memory", default=None, help='EQIW memory (optional). If omitted, do not set #SBATCH --mem and use cluster defaults.')
+    ap.add_argument("--walltime", required=True, help='EQIW time, e.g. "02:00:00" or "2-00:00:00".')
     args = ap.parse_args()
 
-    run_dir = Path(args.dir).resolve()
+    run_dir = Path(args.run_dir).resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    marker = run_dir / args.marker
-    if marker.exists():
-        print(f"[skip] Marker exists: {marker} (already submitted). Delete it to allow re-submit.")
-        return
+    # Write SEET script
+    seet_path = run_dir / args.seet_script
+    write_text(seet_path, SEET_TEMPLATE.format(run_dir=str(run_dir), beta=args.beta))
+    print(f"[write] {seet_path}")
 
-    required_paths = [run_dir / name for name in REQUIRED_FILES]
-    print(f"[watch] Watching {run_dir}")
-    print(f"[watch] Required: {', '.join(REQUIRED_FILES)}")
+    # Write EQIW script
+    eqiw_path = run_dir / args.eqiw_script
+    write_text(eqiw_path, EQIW_TEMPLATE.format(run_dir=str(run_dir), memory=args.memory, walltime=args.walltime))
+    print(f"[write] {eqiw_path}")
 
-    while True:
-        if files_present(required_paths):
-            if stable_files(required_paths, checks=args.stable_checks,
-                            interval_s=args.stable_interval, require_nonempty=args.require_nonempty):
-                break
-            else:
-                print("[watch] Files exist but still changing; waiting...")
-        time.sleep(args.poll)
+    # Submit SEET
+    seet_job = sbatch(seet_path, cwd=run_dir)
+    print(f"[submit] SEET job id: {seet_job}")
 
-    slurm_path = write_slurm(run_dir, args.slurm_name, args.memory, args.walltime)
-    print(f"[write] Wrote slurm file: {slurm_path}")
+    # Submit EQIW with dependency on SEET success
+    eqiw_job = sbatch(eqiw_path, cwd=run_dir, extra_sbatch_args=[f"--dependency=afterok:{seet_job}"])
+    print(f"[submit] EQIW job id: {eqiw_job} (depends on afterok:{seet_job})")
 
-    job_id = sbatch(slurm_path, cwd=run_dir)
-    marker.write_text(str(job_id) + "\n")
-    print(f"[submit] Submitted job {job_id}")
-    print(f"[done] Marker written: {marker}")
+    print("[done] Pipeline submitted.")
+    print(f"       SEET must generate: {', '.join(REQUIRED_FILES)} in {run_dir}")
 
 if __name__ == "__main__":
     main()
+
+
