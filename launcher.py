@@ -9,7 +9,7 @@ REQUIRED_FILES = ("hopping.txt", "delta.txt", "Uijkl.txt")
 
 SLURM_TEMPLATE = """#!/bin/bash -l
 #SBATCH --job-name=eqiw
-#SBATCH -p gcohen_intel1
+#SBATCH -p gcohen_intel
 #SBATCH -o outfile
 #SBATCH -e errfile
 #SBATCH -n 1300
