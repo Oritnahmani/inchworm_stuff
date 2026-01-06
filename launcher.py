@@ -1,13 +1,15 @@
 import argparse
+import os
+import re
 import subprocess
+import time
 from pathlib import Path
 
-REQUIRED_FILES = ("hopping.txt", "delta.txt", "Uijkl.txt")
 
-SEET_TEMPLATE = """#!/bin/bash -l
-#SBATCH --job-name=seet
-#SBATCH --error=error_%j.txt
-#SBATCH --output=output_%j.txt
+SBATCH_TEMPLATE = """#!/bin/bash
+#SBATCH --job-name=inchworm
+#SBATCH --error=error.txt
+#SBATCH --output=output.txt
 #SBATCH --partition=gcohen_2023
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=128
@@ -18,112 +20,184 @@ SEET_TEMPLATE = """#!/bin/bash -l
 #SBATCH --chdir={run_dir}
 
 export OMP_NUM_THREADS=1
-source /gcohenlabstorage/oritnahmani/software/spack_with_Gaurav/spack_init.sh
-ml git
-spack env activate green
-BETA={beta}
-export HDF5_USE_FILE_LOCKING=FALSE
 
-mpirun -n 128  $GREENSEET_ROOT/bin/embedding.exe --scf_type=GW --BETA $BETA --grid_file $GREENSEET_ROOT/share/ir/1e5.h5 --itermax 1 --results_file sim_seet.h5 --weak_results ../mbpt_with_mixining_6/NiO_GW.h5 --embedding_type SEET --mixing_type CDIIS --diis_start 2 --diis_size 5 --mixing_weight 0.3 --jobs SC --seet_input ../init_seet/transform.h5 --bath_file bath.txt --impurity_solver_exec  $GREENSEET_ROOT/seet_solvers/bin/ed_solver --impurity_solver_params " --arpack.NEV=8 --arpack.NCV=20 --lanc.NOMEGA=1000 --FREQ_FILE=$GREENSEET_ROOT/share/ir/1e5.h5 --FREQ_PATH=/fermi/ngrid " --dc_data_prefix "../init_seet/dc_int"  --dc_data_path_prefix "../init_seet/dc_int"  --seet_root_dir "./seet"  --spin_symm true --impurity_solver inchworm
-"""
-
-EQIW_TEMPLATE = """#!/bin/bash -l
-#SBATCH --job-name=eqiw
-#SBATCH -p gcohen_intel
-#SBATCH -o outfile
-#SBATCH -e errfile
-#SBATCH -n 1300
-#SBATCH --exclude=compute-0-16
-#SBATCH --time={walltime}
-#SBATCH --chdir={run_dir}
-
-EquilibriumInchworm_dir=/gcohenlabstorage/eeitan/eq_inchworm_from_dolev_2025/EquilibriumInchworm/
+EquilibriumInchworm_dir=/gcohenlab/data/dolevg/src/eq_inchworm/EquilibriumInchworm
 EquilibriumInchworm_bin=$EquilibriumInchworm_dir/build/inchworm
 
 date
 hostname
-pwd
 
 ml purge
-ml git/2.30.2   gnu8/8.3.0   openmpi4/4.1.0  hdf5/1.10.5   fftw/3.3.9  boost/1.71.0   eigen/3.3.9  ALPSCore/2.3.2-master12.06.22  cmake/3.23.2  openblas/0.3.7
-ml
+ml gnu8 openmpi4 hdf5
 
-# Safety: wait until SEET has produced the required files (and they're non-empty)
-for f in hopping.txt delta.txt Uijkl.txt; do
-  while [ ! -s "$f" ]; do
-    echo "Waiting for $f ..."
-    sleep 10
-  done
-done
-
-rm -f results.h5
-echo 'Evaluating hybridization...' > execution_log.txt
-
-echo 'Starting QMC...' >> execution_log.txt
-mpirun --mca btl ofi --oversubscribe -n $SLURM_NTASKS $EquilibriumInchworm_bin run.param_G_sparseTau --run.type=bare_prop --mc.max_order=1000 >> execution_log.txt
-mpirun --mca btl ofi --oversubscribe -n $SLURM_NTASKS $EquilibriumInchworm_bin run.param_G_sparseTau --run.type=inch_prop >> execution_log.txt
-echo '$EquilibriumInchworm_dir/plot_prop.py'
-python $EquilibriumInchworm_dir/plot_prop.py &
-
-mpirun --mca btl ofi --oversubscribe -n $SLURM_NTASKS $EquilibriumInchworm_bin run.param_G_sparseTau --run.type=inch_gf --mc.max_runtime=20 >> execution_log.txt
-
-echo '$EquilibriumInchworm_dir/plot_inch_gf.py'
-python $EquilibriumInchworm_dir/plot_inch_gf.py &
+echo "Running on:" >> execution_log.txt
+mpirun --mca btl ofi hostname >> execution_log.txt
+mpirun --mca btl ofi $EquilibriumInchworm_bin run.param --run.type=bare_prop --mc.max_order=1000 >> execution_log.txt
+mpirun --mca btl ofi $EquilibriumInchworm_bin run.param --run.type=inch_prop >> execution_log.txt
+mpirun --mca btl ofi $EquilibriumInchworm_bin run.param --run.type=inch_gf >> execution_log.txt
 """
 
-def write_text(path: Path, text: str) -> None:
-    path.write_text(text)
-    path.chmod(0o750)
+RUNPARAM_TEMPLATE = """beta = {beta}
+work_in_local_eigenbasis = true
 
-def sbatch(script: Path, cwd: Path, extra_sbatch_args=None) -> int:
-    extra_sbatch_args = extra_sbatch_args or []
+[hamiltonian]
+orbitals = {orbitals}
+type = file
+file.hopping = "hopping.txt"
+file.Uijkl = "Uijkl.txt"
+energy_shift = 0
+
+[hybridization]
+type = file
+ntau = {hyb_ntau}
+nblock = 2
+norbital = 2
+optimization_type = 3
+
+[mc]
+num_steps = 100000000
+num_equilibration_steps = 1
+num_decorrelation_steps = 1
+max_runtime = 30
+seed = 568460
+max_order = 50
+max_order_block = 8
+
+[inchworm]
+use_bare_prop = true
+ntau_max_bare = 1
+
+[bare_propagator]
+ntau = 20000
+
+[propagator]
+ntau = 150
+
+[gf]
+type_of_discretization = "file"
+file_of_discretization = "time_intervals.txt"
+ntau = 143
+
+[output]
+"""
+
+
+def write_text(path: Path, text: str, make_executable: bool = False) -> None:
+    path.write_text(text)
+    if make_executable:
+        path.chmod(0o750)
+
+
+def sbatch_submit(script_path: Path, cwd: Path) -> int:
+    # --parsable prints jobid (sometimes "jobid;cluster")
     res = subprocess.run(
-        ["sbatch", "--parsable", *extra_sbatch_args, str(script)],
+        ["sbatch", "--parsable", str(script_path)],
         cwd=str(cwd),
         check=True,
         capture_output=True,
         text=True,
     )
-    job_id = res.stdout.strip().split(";")[0]
-    return int(job_id)
+    return int(res.stdout.strip().split(";")[0])
+
+
+def job_state(job_id: int) -> str:
+    """
+    Try sacct first (best for finished jobs). If empty, fall back to squeue.
+    Returns: PENDING/RUNNING/COMPLETED/FAILED/CANCELLED/TIMEOUT/... or UNKNOWN.
+    """
+    sacct = subprocess.run(
+        ["sacct", "-j", str(job_id), "--format=State", "--noheader", "--parsable2"],
+        capture_output=True,
+        text=True,
+    )
+    out = sacct.stdout.strip()
+    if out:
+        # sacct may output multiple lines; take first non-empty state
+        state = next((ln.strip() for ln in out.splitlines() if ln.strip()), "UNKNOWN")
+        # normalize like "COMPLETED", "FAILED", etc.
+        return re.split(r"[ +()]", state)[0]
+
+    squeue = subprocess.run(
+        ["squeue", "-j", str(job_id), "-h", "-o", "%T"],
+        capture_output=True,
+        text=True,
+    )
+    return squeue.stdout.strip() or "UNKNOWN"
+
+
+def wait_for_job(job_id: int, poll_s: float = 10.0) -> str:
+    terminal = {"COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY"}
+    while True:
+        st = job_state(job_id)
+        if st in terminal:
+            return st
+        time.sleep(poll_s)
+
 
 def main():
-    ap = argparse.ArgumentParser(
-        description="Submit SEET job, then submit EQIW job after SEET completes successfully."
-    )
-    ap.add_argument("--run-dir", default=".", help="Directory where both jobs will run / where files are created.")
-    ap.add_argument("--seet-script", default="seet.sbatch", help="Filename for generated SEET sbatch script.")
-    ap.add_argument("--eqiw-script", default="eqiw.sbatch", help="Filename for generated EQIW sbatch script.")
-    ap.add_argument("--beta", default="100", help="Value for BETA in the SEET job.")
-    ap.add_argument("--memory", default=None, help='EQIW memory (optional). If omitted, do not set #SBATCH --mem and use cluster defaults.')
-    ap.add_argument("--walltime", required=True, help='EQIW time, e.g. "02:00:00" or "2-00:00:00".')
+    ap = argparse.ArgumentParser(description="Generate run.param + sbatch, submit, wait, then plot.")
+    ap.add_argument("--run-dir", default=".", help="Directory to write files and run the job.")
+    ap.add_argument("--beta", type=float, default=100.0, help="Value for beta in run.param.")
+    ap.add_argument("--orbitals", type=int, default=4, help="Value for [hamiltonian].orbitals in run.param.")
+    ap.add_argument("--hyb-ntau", type=int, default=1001, help="Value for [hybridization].ntau in run.param.")
+    ap.add_argument("--submit", action="store_true", help="Actually call sbatch (otherwise only generate files).")
+    ap.add_argument("--poll", type=float, default=10.0, help="Polling seconds while waiting for job.")
+    ap.add_argument("--plot-after", action="store_true", help="Run plot_inch_gf.py after job completes.")
     args = ap.parse_args()
 
     run_dir = Path(args.run_dir).resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    # Write SEET script
-    seet_path = run_dir / args.seet_script
-    write_text(seet_path, SEET_TEMPLATE.format(run_dir=str(run_dir), beta=args.beta))
-    print(f"[write] {seet_path}")
+    # 1) Write run.param
+    runparam_path = run_dir / "run.param"
+    write_text(
+        runparam_path,
+        RUNPARAM_TEMPLATE.format(beta=args.beta, orbitals=args.orbitals, hyb_ntau=args.hyb_ntau),
+    )
+    print(f"[write] {runparam_path}")
 
-    # Write EQIW script
-    eqiw_path = run_dir / args.eqiw_script
-    write_text(eqiw_path, EQIW_TEMPLATE.format(run_dir=str(run_dir), memory=args.memory, walltime=args.walltime))
-    print(f"[write] {eqiw_path}")
+    # 2) Write sbatch script
+    sbatch_path = run_dir / "inchworm.sbatch"
+    write_text(
+        sbatch_path,
+        SBATCH_TEMPLATE.format(run_dir=str(run_dir)),
+        make_executable=False,  # not required for sbatch
+    )
+    print(f"[write] {sbatch_path}")
 
-    # Submit SEET
-    seet_job = sbatch(seet_path, cwd=run_dir)
-    print(f"[submit] SEET job id: {seet_job}")
+    if not args.submit:
+        print("[info] Not submitting (use --submit to sbatch).")
+        return
 
-    # Submit EQIW with dependency on SEET success
-    eqiw_job = sbatch(eqiw_path, cwd=run_dir, extra_sbatch_args=[f"--dependency=afterok:{seet_job}"])
-    print(f"[submit] EQIW job id: {eqiw_job} (depends on afterok:{seet_job})")
+    # 3) Submit
+    job_id = sbatch_submit(sbatch_path, cwd=run_dir)
+    print(f"[submit] job id: {job_id}")
 
-    print("[done] Pipeline submitted.")
-    print(f"       SEET must generate: {', '.join(REQUIRED_FILES)} in {run_dir}")
+    # 4) Wait for completion
+    final_state = wait_for_job(job_id, poll_s=args.poll)
+    print(f"[done] job {job_id} finished with state: {final_state}")
+
+    if final_state != "COMPLETED":
+        print("[warn] Job did not complete successfully; skipping plot.")
+        return
+
+    if not args.plot_after:
+        print("[info] Not plotting (use --plot-after).")
+        return
+
+    # 5) Run plot script AFTER completion.
+    # We know the sbatch defines EquilibriumInchworm_dir, but that variable exists only inside the job shell.
+    # So we replicate the same directory here in Python:
+    eq_dir = Path("/gcohenlab/data/dolevg/src/eq_inchworm/EquilibriumInchworm")
+    plot_script = eq_dir / "plot_inch_gf.py"
+
+    if not plot_script.exists():
+        raise FileNotFoundError(f"Plot script not found: {plot_script}")
+
+    print(f"[plot] Running: python {plot_script}")
+    subprocess.run(["python", str(plot_script)], cwd=str(run_dir), check=True)
+    print("[plot] Done.")
+
 
 if __name__ == "__main__":
     main()
-
-
