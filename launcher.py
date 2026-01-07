@@ -100,38 +100,7 @@ def sbatch_submit(script_path: Path, cwd: Path) -> int:
     return int(res.stdout.strip().split(";")[0])
 
 
-def job_state(job_id: int) -> str:
-    """
-    Try sacct first (best for finished jobs). If empty, fall back to squeue.
-    Returns: PENDING/RUNNING/COMPLETED/FAILED/CANCELLED/TIMEOUT/... or UNKNOWN.
-    """
-    sacct = subprocess.run(
-        ["sacct", "-j", str(job_id), "--format=State", "--noheader", "--parsable2"],
-        capture_output=True,
-        text=True,
-    )
-    out = sacct.stdout.strip()
-    if out:
-        # sacct may output multiple lines; take first non-empty state
-        state = next((ln.strip() for ln in out.splitlines() if ln.strip()), "UNKNOWN")
-        # normalize like "COMPLETED", "FAILED", etc.
-        return re.split(r"[ +()]", state)[0]
 
-    squeue = subprocess.run(
-        ["squeue", "-j", str(job_id), "-h", "-o", "%T"],
-        capture_output=True,
-        text=True,
-    )
-    return squeue.stdout.strip() or "UNKNOWN"
-
-
-def wait_for_job(job_id: int, poll_s: float = 10.0) -> str:
-    terminal = {"COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY"}
-    while True:
-        st = job_state(job_id)
-        if st in terminal:
-            return st
-        time.sleep(poll_s)
 
 
 def main():
