@@ -4,6 +4,7 @@ import re
 import subprocess
 import time
 from pathlib import Path
+import h5py
 
 
 SBATCH_TEMPLATE = """#!/bin/bash
@@ -99,6 +100,46 @@ def sbatch_submit(script_path: Path, cwd: Path) -> int:
     )
     return int(res.stdout.strip().split(";")[0])
 
+def _latest_iter_group(h5: h5py.File) -> str:
+    """
+    Find the largest 'iterN' group present in the file and return its name, e.g. 'iter11'.
+    """
+    iters = []
+    for k in h5.keys():
+        if k.startswith("iter"):
+            try:
+                iters.append((int(k[4:]), k))  # (N, "iterN")
+            except ValueError:
+                pass
+    if not iters:
+        raise KeyError("No iter* groups found at H5 root (expected groups like iter0, iter1, ...).")
+    return max(iters)[1]
+
+
+def timetxt_and_beta(results_path: Path, run_dir: Path, normalize_to_unit: bool = True) -> float:
+    """
+    Reads tau mesh from the GW results H5 file, writes run_dir/time_intervals.txt,
+    and returns beta (assumed tau[-1]).
+    """
+    results_path = Path(results_path)
+    run_dir = Path(run_dir)
+
+    with h5py.File(results_path, "r") as f:
+        iter_group = _latest_iter_group(f)  # e.g. "iter11"
+        mesh_path = f"/{iter_group}/Selfenergy/mesh"
+        if mesh_path not in f:
+            raise KeyError(f"Missing dataset {mesh_path} in {results_path}")
+
+        tau = f[mesh_path][:]
+
+    beta = float(tau[-1])
+
+    x = (tau / beta) if normalize_to_unit else tau
+
+    out = run_dir / "time_intervals.txt"
+    out.write_text("\n".join(f"{v:.16e}" for v in x) + "\n")
+
+    return beta
 
 
 
@@ -106,13 +147,14 @@ def sbatch_submit(script_path: Path, cwd: Path) -> int:
 def main():
     ap = argparse.ArgumentParser(description="Generate run.param + sbatch, submit, wait, then plot.")
     ap.add_argument("--run-dir", default=".", help="Directory to write files and run the job.")
-    ap.add_argument("--beta", type=float, default=100.0, help="Value for beta in run.param.")
     ap.add_argument("--orbitals", type=int, default=4, help="Value for [hamiltonian].orbitals in run.param.")
     ap.add_argument("--hyb-ntau", type=int, default=1001, help="Value for [hybridization].ntau in run.param.")
     ap.add_argument("--submit", action="store_true", help="Actually call sbatch (otherwise only generate files).")
     ap.add_argument("--poll", type=float, default=10.0, help="Polling seconds while waiting for job.")
     ap.add_argument("--plot-after", action="store_true", help="Run plot_inch_gf.py after job completes.")
+    ap.add_argument("--results-path", default=None, help="results file from previous GW calculation.")
     args = ap.parse_args()
+    beta = timetxt_and_beta(args.results_path, args.run_dir)
 
     run_dir = Path(args.run_dir).resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
