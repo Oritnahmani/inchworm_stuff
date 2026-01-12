@@ -18,7 +18,9 @@ def read_greenfunction_from_txt(number_of_orbitals, time_filename,green_path):
                 continue
             # t_str, ij_str = line.split()
             t_str = line.split()[0]
-            t_list.append(float(t_str))
+            t_str = t_str.strip().strip('[],')   # remove [ ] and commas
+            if t_str:                            # skip empty tokens
+                t_list.append(float(t_str))
     t_arr = np.array(t_list)    
     t_shape = len(t_arr)
     green_tau = np.zeros((t_shape, number_of_orbitals, number_of_orbitals), dtype=complex)
