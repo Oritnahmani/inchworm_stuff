@@ -37,26 +37,45 @@ def read_greenfunction_from_txt(number_of_orbitals, time_filename,green_path):
                     green_tau[:, i, j] = np.array([complex(x) for x in ij_str.strip().split(',')])
     return green_tau, t_arr
 
-
-def read_delta_tau_from_txt(delta_file,t_arr,number_of_orbitals):
-    delta_tau = np.zeros((t_arr.shape[0],number_of_orbitals, number_of_orbitals), dtype=complex)
-    with open(delta_file) as k:
-        for raw_line in k:
+def read_delta_tau_from_txt(delta_file: str, number_of_orbitals: int,beta: float, endpoint: bool = False):
+    # ---------- pass 1: determine max l ----------
+    l_max = -1
+    with open(delta_file, "r") as f:
+        for raw_line in f:
             line = raw_line.strip()
             if not line or line.startswith("#"):
                 continue
-            # parts = line.split()
+            parts = line.split()
+            if len(parts) < 5:
+                continue  # or raise, if you prefer strict
+            l = int(parts[0])
+            if l > l_max:
+                l_max = l
 
-            # for l in range(t_arr.shape[0]):
-            #     for i in range(number_of_orbitals):
-            #         for m in range(number_of_orbitals):
-            l_str, i_str, m_str, ij_str_re, ij_str_im = line.split()
-            # l_str , i_str , m_str , ij_str_re , ij_str_im = line.split()
+    if l_max < 0:
+        raise ValueError(f"No data lines found in {delta_file}")
+
+    n_tau = l_max + 1
+
+    # ---------- allocate ----------
+    delta_tau = np.zeros((n_tau, number_of_orbitals, number_of_orbitals), dtype=complex)
+
+    # ---------- pass 2: fill ----------
+    with open(delta_file, "r") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            l_str, i_str, m_str, re_str, im_str = line.split()
             l = int(l_str)
             i = int(i_str)
             m = int(m_str)
-            delta_tau[l, int(i), int(m)] = complex(float(ij_str_re) + 1j * float(ij_str_im))
-    return delta_tau
+            delta_tau[l, i, m] = float(re_str) + 1j * float(im_str)
+
+    tau_delta = np.linspace(0.0, beta, n_tau, endpoint=endpoint)
+
+
+    return delta_tau, tau_delta
 
     
 def read_hopping_from_txt(hopping_file, number_of_orbitals):
