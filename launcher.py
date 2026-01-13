@@ -5,15 +5,16 @@ import subprocess
 import time
 from pathlib import Path
 import h5py
+import json
 
 
 SBATCH_TEMPLATE = """#!/bin/bash
 #SBATCH --job-name=inchworm
 #SBATCH --error=error.txt
 #SBATCH --output=output.txt
-#SBATCH --partition=gcohen_2023
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=128
+#SBATCH --partition={partition}
+#SBATCH --nodes={nodes}
+#SBATCH --ntasks={ntasks}
 ##SBATCH --cpus-per-task=128
 #SBATCH --time=336:00:00
 #SBATCH --hint=nomultithread
@@ -81,6 +82,76 @@ ntau = 143
 
 [output]
 """
+
+def query_nodes(partitions: list[str] | None = None):
+    """
+    Returns a list of dicts with keys: node, cpus, state, partitions
+    Uses sinfo. Works best if you can see all nodes.
+    """
+    cmd = ["sinfo", "-N", "-h", "-o", "%N|%P|%c|%t"]
+    if partitions:
+        # sinfo -p accepts comma-separated partitions
+        cmd = ["sinfo", "-N", "-h", "-p", ",".join(partitions), "-o", "%N|%P|%c|%t"]
+
+    res = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    out = []
+    for line in res.stdout.splitlines():
+        node, part, cpus, state = line.strip().split("|")
+        # %P can look like: "gcohen_2023*,otherpart" (asterisk marks default)
+        parts = [p.replace("*", "") for p in part.split(",")]
+        out.append({"node": node, "partitions": parts, "cpus": int(cpus), "state": state})
+    return out
+
+
+def pick_best_node(nodes, prefer_states=("idle", "mix")):
+    """
+    Pick the node with the most CPUs among preferred states (IDLE/MIX).
+    Slurm states from sinfo are usually uppercase: IDLE, MIX, ALLOC, DOWN...
+    We'll normalize.
+    """
+    pref = {s.lower() for s in prefer_states}
+    candidates = []
+    for n in nodes:
+        st = n["state"].lower()
+        if st in pref:
+            candidates.append(n)
+
+    # If none are idle/mix, fall back to all nodes (it may queue)
+    if not candidates:
+        candidates = nodes
+
+    return max(candidates, key=lambda x: x["cpus"])
+
+def load_selection(run_dir: Path) -> dict | None:
+    f = run_dir / ".slurm_selection.json"
+    if not f.exists():
+        return None
+    return json.loads(f.read_text())
+
+def save_selection(run_dir: Path, selection: dict) -> None:
+    (run_dir / ".slurm_selection.json").write_text(json.dumps(selection, indent=2) + "\n")
+
+def decide_resources(run_dir: Path, partitions: list[str], pin_node: bool):
+    saved = load_selection(run_dir)
+    if saved:
+        # your requirement: second time reuse CPU count
+        return saved  # contains cpus, partition, maybe node
+
+    nodes = query_nodes(partitions)
+    best = pick_best_node(nodes)
+
+    # Choose a partition to submit to: pick the first one in best["partitions"]
+    # (or you can prefer a specific one)
+    chosen_partition = best["partitions"][0]
+
+    selection = {
+        "ntasks_per_node": best["cpus"],
+        "partition": chosen_partition,
+        "node": best["node"] if pin_node else None
+    }
+    save_selection(run_dir, selection)
+    return selection
+
 
 
 def write_text(path: Path, text: str, make_executable: bool = False) -> None:
