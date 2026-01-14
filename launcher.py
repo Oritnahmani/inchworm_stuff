@@ -83,74 +83,98 @@ ntau = 143
 [output]
 """
 
-def query_nodes(partitions: list[str] | None = None):
+def _norm_state(s: str) -> str:
     """
-    Returns a list of dicts with keys: node, cpus, state, partitions
-    Uses sinfo. Works best if you can see all nodes.
+    Normalize sinfo node states; clusters sometimes add suffixes like 'mix+', 'idle~', etc.
     """
-    cmd = ["sinfo", "-N", "-h", "-o", "%N|%P|%c|%t"]
+    return s.strip().lower().strip("+~*")
+
+def query_nodes(partitions: list[str] | None = None) -> list[dict]:
+    """
+    Return list of node dicts:
+      {"node": str, "partitions": [str], "cpus": int, "state": str}
+    """
+    fmt = "%N|%P|%c|%t"
+    cmd = ["sinfo", "-N", "-h", "-o", fmt]
     if partitions:
-        # sinfo -p accepts comma-separated partitions
-        cmd = ["sinfo", "-N", "-h", "-p", ",".join(partitions), "-o", "%N|%P|%c|%t"]
+        cmd = ["sinfo", "-N", "-h", "-p", ",".join(partitions), "-o", fmt]
 
     res = subprocess.run(cmd, check=True, capture_output=True, text=True)
-    out = []
+    nodes = []
     for line in res.stdout.splitlines():
         node, part, cpus, state = line.strip().split("|")
-        # %P can look like: "gcohen_2023*,otherpart" (asterisk marks default)
         parts = [p.replace("*", "") for p in part.split(",")]
-        out.append({"node": node, "partitions": parts, "cpus": int(cpus), "state": state})
-    return out
+        nodes.append(
+            {"node": node, "partitions": parts, "cpus": int(cpus), "state": _norm_state(state)}
+        )
+    return nodes
 
-
-def pick_best_node(nodes, prefer_states=("idle", "mix")):
+def pick_best_nodes_auto(
+    nodes: list[dict],
+    prefer_states=("idle", "mix"),
+    max_nodes: int | None = None,
+    min_cpus: int | None = None,
+    prefer: str = "max_total",   # "max_total" or "highest_cpus"
+) -> dict:
     """
-    Pick the node with the most CPUs among preferred states (IDLE/MIX).
-    Slurm states from sinfo are usually uppercase: IDLE, MIX, ALLOC, DOWN...
-    We'll normalize.
-    """
-    pref = {s.lower() for s in prefer_states}
-    candidates = []
-    for n in nodes:
-        st = n["state"].lower()
-        if st in pref:
-            candidates.append(n)
+    Pick a *homogeneous* set of nodes (same CPU count) and decide how many nodes to use.
 
-    # If none are idle/mix, fall back to all nodes (it may queue)
+    Returns a dict:
+      {
+        "nodes": ["nodeA", "nodeB", ...],
+        "cpus_per_node": 128,
+        "num_nodes": 4,
+        "total_tasks": 512
+      }
+
+    Heuristics:
+    - Filter by state in prefer_states
+    - Optionally filter by min_cpus
+    - Group by cpus_per_node
+    - Choose best CPU bucket either by:
+        * max_total: maximize (cpus_per_node * available_node_count)
+        * highest_cpus: choose highest cpus_per_node (even if fewer nodes)
+    - Use up to max_nodes from that bucket
+    """
+    prefer_set = {s.lower() for s in prefer_states}
+
+    candidates = [n for n in nodes if n["state"] in prefer_set]
     if not candidates:
+        # Fall back: if nothing idle/mix, consider all nodes (job may queue)
         candidates = nodes
 
-    return max(candidates, key=lambda x: x["cpus"])
+    if min_cpus is not None:
+        candidates = [n for n in candidates if n["cpus"] >= min_cpus]
 
-def load_selection(run_dir: Path) -> dict | None:
-    f = run_dir / ".slurm_selection.json"
-    if not f.exists():
-        return None
-    return json.loads(f.read_text())
+    if not candidates:
+        raise RuntimeError("No candidate nodes after filtering (partition/state/min_cpus).")
 
-def save_selection(run_dir: Path, selection: dict) -> None:
-    (run_dir / ".slurm_selection.json").write_text(json.dumps(selection, indent=2) + "\n")
+    buckets = defaultdict(list)
+    for n in candidates:
+        buckets[n["cpus"]].append(n["node"])
 
-def decide_resources(run_dir: Path, partitions: list[str], pin_node: bool):
-    saved = load_selection(run_dir)
-    if saved:
-        # your requirement: second time reuse CPU count
-        return saved  # contains cpus, partition, maybe node
+    # Decide which bucket to use
+    if prefer == "highest_cpus":
+        chosen_cpus = max(buckets.keys())
+    elif prefer == "max_total":
+        # maximize cpus * count; tie-breaker: higher cpus
+        chosen_cpus = max(buckets.keys(), key=lambda c: (c * len(buckets[c]), c))
+    else:
+        raise ValueError("prefer must be 'max_total' or 'highest_cpus'")
 
-    nodes = query_nodes(partitions)
-    best = pick_best_node(nodes)
+    node_list = sorted(buckets[chosen_cpus])  # stable ordering
+    if max_nodes is not None:
+        node_list = node_list[:max_nodes]
 
-    # Choose a partition to submit to: pick the first one in best["partitions"]
-    # (or you can prefer a specific one)
-    chosen_partition = best["partitions"][0]
+    num_nodes = len(node_list)
+    total_tasks = chosen_cpus * num_nodes
 
-    selection = {
-        "ntasks_per_node": best["cpus"],
-        "partition": chosen_partition,
-        "node": best["node"] if pin_node else None
+    return {
+        "nodes": node_list,
+        "cpus_per_node": chosen_cpus,
+        "num_nodes": num_nodes,
+        "total_tasks": total_tasks,
     }
-    save_selection(run_dir, selection)
-    return selection
 
 
 
@@ -230,7 +254,12 @@ def main():
     run_dir = Path(args.run_dir).resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
 
+
+    
+
     # 1) Write run.param
+
+
     runparam_path = run_dir / "run.param"
     write_text(
         runparam_path,
@@ -238,14 +267,27 @@ def main():
     )
     print(f"[write] {runparam_path}")
 
+    nodes = query_nodes(partitions=["gcohen_2023"])
+    best = pick_best_node(nodes)
+
+    partition = best["partitions"][0]
+    ntasks_per_node = best["cpus"]
+
+    pin_node = True
+    nodelist_line = f"#SBATCH --nodelist={best['node']}" if pin_node else ""
+
+
     # 2) Write sbatch script
     sbatch_path = run_dir / "inchworm.sbatch"
     write_text(
         sbatch_path,
-        SBATCH_TEMPLATE.format(run_dir=str(run_dir)),
-        make_executable=False,  # not required for sbatch
-    )
-    print(f"[write] {sbatch_path}")
+    SBATCH_TEMPLATE.format(
+        run_dir=str(run_dir),
+        partition=partition,
+        ntasks_per_node=ntasks_per_node,
+        nodelist_line=nodelist_line,
+    ),
+)
 
     if not args.submit:
         print("[info] Not submitting (use --submit to sbatch).")
