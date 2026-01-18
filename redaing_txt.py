@@ -78,17 +78,30 @@ def read_delta_tau_from_txt(delta_file: str, number_of_orbitals: int,beta: float
     return delta_tau, tau_delta
 
     
-def read_hopping_from_txt(hopping_file, number_of_orbitals):
-    hopping = np.zeros(( number_of_orbitals, number_of_orbitals), dtype=complex)
-    with open(hopping_file) as k:
-        for raw_line in k:
+def read_hopping_from_txt(hopping_file):
+    entries = []
+    max_index = -1
+
+    with open(hopping_file) as f:
+        for raw_line in f:
             line = raw_line.strip()
             if not line or line.startswith("#"):
                 continue
-            i_str, m_str, ij_str_re, ij_str_im = line.split()
+
+            i_str, j_str, re_str, im_str = line.split()
             i = int(i_str)
-            m = int(m_str)
-            hopping[ int(i), int(m)] = complex(float(ij_str_re) + 1j * float(ij_str_im))
+            j = int(j_str)
+
+            val = complex(float(re_str), float(im_str))
+            entries.append((i, j, val))
+
+            max_index = max(max_index, i, j)
+
+    norb = max_index + 1
+    hopping = np.zeros((norb, norb), dtype=complex)
+
+    for i, j, val in entries:
+        hopping[i, j] = val
     return hopping
            
 
@@ -101,9 +114,10 @@ if __name__ == '__main__':
     time_filename = f'/home/orit/VS_codes1/example/G_0_0.dat'
     delta_file = '/home/orit/VS_codes1/example/delta.txt'
     hopping_file = '/home/orit/VS_codes1/example/hopping.txt'
+    hopping = read_hopping_from_txt(hopping_file)
+    number_of_orbitals = hopping.shape[0]
     green_tau, t_arr = read_greenfunction_from_txt(number_of_orbitals, time_filename,'/home/orit/VS_codes1/example')
     delta_tau = read_delta_tau_from_txt(delta_file, t_arr, number_of_orbitals)
-    hopping = read_hopping_from_txt(hopping_file, number_of_orbitals)
     print (hopping)
     # print(t_arr.shape)
     # print(green_tau)

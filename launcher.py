@@ -15,7 +15,6 @@ SBATCH_TEMPLATE = """#!/bin/bash
 #SBATCH --partition={partition}
 #SBATCH --nodes={nodes}
 #SBATCH --ntasks={ntasks}
-##SBATCH --cpus-per-task=128
 #SBATCH --time=336:00:00
 #SBATCH --hint=nomultithread
 #SBATCH --exclusive
