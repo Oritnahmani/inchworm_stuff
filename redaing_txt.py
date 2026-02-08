@@ -6,38 +6,94 @@ import scipy.constants
 # import h5py
 from green_mbtools.pesto import mb
 from mbanalysis import ir
+import os
 
 
 
-def read_greenfunction_from_txt(number_of_orbitals, time_filename,green_path):
-    t_list = []
-    with open(time_filename) as k:
-        for line in k:
-            line = line.strip()
+def read_greenfunction_from_txt_spin(time_filename: str, green_path: str, endpoint: bool = False):
+    """
+    Reads files green_path/G_{i}_{j}.dat where i,j are *combined* indices (spin+orbital).
+    Each file has two columns: tau  value   (value is real in your example; can be complex if needed)
+
+    Returns:
+      G_tau: (ntime, 2, norb, norb) complex
+      tau  : (ntime,) float
+    """
+
+    # ---- read tau grid from time_filename (first column) ----
+    tau = []
+    with open(time_filename, "r") as f:
+        for raw_line in f:
+            line = raw_line.strip()
             if not line or line.startswith("#"):
                 continue
-            # t_str, ij_str = line.split()
-            t_str = line.split()[0]
-            t_str = t_str.strip().strip('[],')   # remove [ ] and commas
-            if t_str:                            # skip empty tokens
-                t_list.append(float(t_str))
-    t_arr = np.array(t_list)    
-    t_shape = len(t_arr)
-    green_tau = np.zeros((t_shape, number_of_orbitals, number_of_orbitals), dtype=complex)
-    for i in range(number_of_orbitals):
-        for j in range(number_of_orbitals):
-            # data = np.loadtxt(f'/home/orit/VS_codes1/example/G_{i}_{j}.dat')
-            with open(f'{green_path}/G_{i}_{j}.dat') as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    t_str, ij_str = line.split()            # split into 2 parts
-                    # TODO mabey there is a problem
-                    green_tau[:, i, j] = np.array([complex(x) for x in ij_str.strip().split(',')])
-    return green_tau, t_arr
+            tau.append(float(line.split()[0]))
+    tau = np.asarray(tau, dtype=float)
+    ntime = tau.size
+    if ntime == 0:
+        raise ValueError(f"No tau points found in {time_filename}")
 
-import numpy as np
+    # ---- infer combined dimension by scanning available filenames ----
+    # expects names like G_0_0.dat
+    max_idx = -1
+    for name in os.listdir(green_path):
+        if not (name.startswith("G_") and name.endswith(".dat")):
+            continue
+        parts = name[:-4].split("_")  # strip ".dat", split "G_i_j"
+        if len(parts) != 3:
+            continue
+        try:
+            i = int(parts[1]); j = int(parts[2])
+        except ValueError:
+            continue
+        max_idx = max(max_idx, i, j)
+
+    if max_idx < 0:
+        raise ValueError(f"No G_i_j.dat files found in {green_path}")
+
+    n_combined = max_idx + 1
+    if n_combined % 2 != 0:
+        raise ValueError(f"Combined dimension {n_combined} is odd; cannot split into 2 spins.")
+
+    norb = n_combined // 2
+    nspin = 2
+
+    # ---- allocate output ----
+    G_tau = np.zeros((ntime, nspin, norb, norb), dtype=complex)
+
+    # ---- fill from files ----
+    for i in range(n_combined):
+        for j in range(n_combined):
+            path = os.path.join(green_path, f"G_{i}_{j}.dat")
+            if not os.path.exists(path):
+                raise FileNotFoundError(f"Missing file: {path}")
+
+            # read second column (value) and ignore first (tau)
+            arr = np.loadtxt(path)
+            if arr.ndim == 1:
+                # handle single-line edge case
+                vals = np.array([arr[1]], dtype=float)
+            else:
+                vals = arr[:, 1]
+
+            if vals.size != ntime:
+                raise ValueError(
+                    f"Time grid mismatch in {path}: got {vals.size} points, expected {ntime}"
+                )
+
+            si, sj = i % 2, j % 2
+            oi, oj = i // 2, j // 2
+
+            # only store spin-diagonal blocks
+            if si == sj:
+                G_tau[:, si, oi, oj] = vals.astype(complex)
+            else:
+                # optional: warn if there is a sizable spin-flip term
+                if np.max(np.abs(vals)) > 1e-12:
+                    print(f"Warning: spin-flip Green block in file G_{i}_{j}.dat (max |G| = {np.max(np.abs(vals))})")
+
+    return G_tau, tau
+
 
 def read_delta_tau_from_txt_spin(delta_file: str, beta: float, endpoint: bool = False):
     # ---------- pass 1: determine max l and max combined index ----------
@@ -160,12 +216,12 @@ if __name__ == '__main__':
     beta = 10.0
     # for i in range(number_of_orbitals):
     #     for j in range(number_of_orbitals):
-    time_filename = f'/home/orit/VS_codes1/example/G_0_0.dat'
+    time_filename = f'/home/orit/VS_codes1/G_0_0.dat'
     delta_file = '/home/orit/VS_codes1/delta.txt'
     hopping_file = '/home/orit/VS_codes1/hopping.txt'
     # number_of_orbitals = hopping.shape[0]
-    # green_tau, t_arr = read_greenfunction_from_txt(number_of_orbitals, time_filename,'/home/orit/VS_codes1/example')
+    green_tau, t_arr = read_greenfunction_from_txt_spin(time_filename,'/home/orit/VS_codes1')
     delta_tau, tau_delta = read_delta_tau_from_txt_spin(delta_file,beta)
     hopping = read_hopping_from_txt_spin(hopping_file)
 
-    print("delta_tau shape:", delta_tau.shape)
+    print(green_tau.shape)
