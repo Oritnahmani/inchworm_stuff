@@ -8,6 +8,102 @@ from green_mbtools.pesto import mb
 from mbanalysis import ir
 import os
 
+def read_greenfunction_from_txt_spin_blocked(time_filename: str, green_path: str, endpoint: bool = False,
+                                             tol: float = 1e-12):
+    """
+    Reads files green_path/G_{i}_{j}.dat where i,j are *combined* indices.
+    Assumes *spin-blocked* ordering:
+        combined index = spin * norb + orbital
+    so:
+        spin = idx // norb
+        orb  = idx %  norb
+
+    Each file has two columns: tau  value  (value assumed real; stored as complex)
+
+    Returns:
+      G_tau: (ntime, 2, norb, norb) complex
+      tau  : (ntime,) float
+    """
+
+    # ---- read tau grid from time_filename (first column) ----
+    tau = []
+    with open(time_filename, "r") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            tau.append(float(line.split()[0]))
+    tau = np.asarray(tau, dtype=float)
+    ntime = tau.size
+    if ntime == 0:
+        raise ValueError(f"No tau points found in {time_filename}")
+
+    # ---- infer combined dimension by scanning available filenames ----
+    max_idx = -1
+    for name in os.listdir(green_path):
+        if not (name.startswith("G_") and name.endswith(".dat")):
+            continue
+        parts = name[:-4].split("_")  # "G_i_j"
+        if len(parts) != 3:
+            continue
+        try:
+            i = int(parts[1]); j = int(parts[2])
+        except ValueError:
+            continue
+        max_idx = max(max_idx, i, j)
+
+    if max_idx < 0:
+        raise ValueError(f"No G_i_j.dat files found in {green_path}")
+
+    n_combined = max_idx + 1
+    if n_combined % 2 != 0:
+        raise ValueError(f"Combined dimension {n_combined} is odd; cannot split into 2 spins.")
+
+    norb = n_combined // 2
+    nspin = 2
+
+    # ---- allocate output ----
+    G_tau = np.zeros((ntime, nspin, norb, norb), dtype=complex)
+
+    # ---- fill from files ----
+    for i in range(n_combined):
+        for j in range(n_combined):
+            path = os.path.join(green_path, f"G_{i}_{j}.dat")
+            if not os.path.exists(path):
+                raise FileNotFoundError(f"Missing file: {path}")
+
+            arr = np.loadtxt(path)
+            if arr.ndim == 1:
+                vals = np.array([arr[1]], dtype=float)
+            else:
+                vals = arr[:, 1]
+
+            if vals.size != ntime:
+                raise ValueError(
+                    f"Time grid mismatch in {path}: got {vals.size} points, expected {ntime}"
+                )
+
+            # ---- spin-blocked mapping ----
+            si, sj = i // norb, j // norb
+            oi, oj = i % norb,  j % norb
+
+            if si >= nspin or sj >= nspin:
+                raise ValueError(
+                    f"Index-to-spin mapping out of range: i={i} -> si={si}, j={j} -> sj={sj}, "
+                    f"with norb={norb}, nspin={nspin}"
+                )
+
+            # only store spin-diagonal blocks
+            if si == sj:
+                G_tau[:, si, oi, oj] = vals.astype(complex)
+            else:
+                # warn if sizable spin-flip blocks exist
+                vmax = float(np.max(np.abs(vals)))
+                if vmax > tol:
+                    print(f"Warning: spin-flip Green block in file G_{i}_{j}.dat (max |G| = {vmax})")
+
+    return G_tau, tau
+
 
 
 def read_greenfunction_from_txt_spin(time_filename: str, green_path: str, endpoint: bool = False):
@@ -224,4 +320,4 @@ if __name__ == '__main__':
     delta_tau, tau_delta = read_delta_tau_from_txt_spin(delta_file,beta)
     hopping = read_hopping_from_txt_spin(hopping_file)
 
-    print(green_tau.shape)
+    print(green_tau)
