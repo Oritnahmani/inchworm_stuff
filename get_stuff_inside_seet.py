@@ -12,33 +12,51 @@ from data_analyzing_from_mbpt.processing_after_inchworm import read_mu, interpol
 
 
 
-def open_seet_and_insert_new_results(*, results_file, iteration, sigma_inchworm, uu_trans, X_k, mixing, ns_imp):
-    fsimseet = h5py.File(results_file, 'r+')
-    group = fsimseet['iter{}/Selfenergy'.format(iteration)]
-    sigma_in = group['data'][()]
-    nomega, ns, nk, nao_full, _ = sigma_in.shape
-    assert ns_imp == ns, "Spin dimension mismatch"
-    nimp = len(uu_trans)
-    sigma_local_orth = np.zeros((nomega, ns, nao_full, nao_full), dtype=np.complex128)
-    for i in range(nimp):
-        sigma_local_orth += np.einsum('pi, tspq, qj -> wsij',
-                                  uu_trans[i].conj(), sigma_inchworm[i], uu_trans[i],optimize=True)
+def transform_imp_sigma_to_ao_k(
+    *,
+    sigma_imp: np.ndarray,     # (nomega, ns, nao_imp, nao_imp)
+    uu: np.ndarray,            # (nao_imp, nao_full)  OR (nao_full, nao_imp)
+    X_k: np.ndarray,           # (nk, nao_full, nao_full)
+) -> np.ndarray:
+    """
+    Transform impurity self-energy Σ_imp(iω) to lattice AO basis per k:
+      Σ_imp(w,s,p,q)  --UU-->  Σ_full_orth(w,s,i,j)  --X_k-->  Σ_AO(w,s,k,a,d)
 
-    sigma_loc_ao = np.zeros((nw, ns, nk, nao_full, nao_full), dtype=np.complex128)
-    for w in range(nw):
+    Returns
+    -------
+    sigma_ao : (nomega, ns, nk, nao_full, nao_full)
+    """
+
+    nomega, ns, nao_imp, _ = sigma_imp.shape
+    nk, nao_full, _ = X_k.shape
+
+    # --- embed: Σ_full_orth = U^† Σ_imp U ---
+    # Two possible UU orientations. Try one; if it fails, use the other.
+    try:
+        # UU indexed as (p,i): (nao_imp, nao_full)
+        sigma_full_orth = np.einsum(
+            "pi, wspq, qj -> wsij",
+            uu.conj(), sigma_imp, uu,
+            optimize=True
+        )
+    except ValueError:
+        # UU indexed as (i,p): (nao_full, nao_imp)
+        sigma_full_orth = np.einsum(
+            "ip, wspq, jq -> wsij",
+            uu.conj(), sigma_imp, uu,
+            optimize=True
+        )
+
+    # --- rotate to AO(k): Σ_AO(k) = X_k Σ_orth X_k^† ---
+    sigma_ao = np.zeros((nomega, ns, nk, nao_full, nao_full), dtype=np.complex128)
+    for w in range(nomega):
         for s in range(ns):
-            sigma_loc_ao[w, s] = np.einsum(
-                'kab, bc, kdc -> kad',
-                X_k,
-                sigma_local_orth[w, s],
-                X_k.conj(),
+            sigma_ao[w, s] = np.einsum(
+                "kab, bc, kdc -> kad",
+                X_k, sigma_full_orth[w, s], X_k.conj(),
                 optimize=True
             )
-
-    sigma_in += mixing * sigma_loc_ao
-
-    group['data'][...] = sigma_in
-    fsimseet.close()
+    return sigma_ao
 
 
 
