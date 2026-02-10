@@ -12,57 +12,70 @@ from data_analyzing_from_mbpt.processing_after_inchworm import read_mu, interpol
 
 
 
-def transform_imp_sigma_to_ao_k(
+def build_full_space_sigma_from_impurity(
     *,
-    sigma_imp: np.ndarray,     # (nomega, ns, nao_imp, nao_imp)
-    uu: np.ndarray,            # (nao_imp, nao_full)  OR (nao_full, nao_imp)
-    X_k: np.ndarray,           # (nk, nao_full, nao_full)
-) -> np.ndarray:
+    sigma_imp: np.ndarray,         # (nomega, ns, nao_imp, nao_imp)
+    uu: np.ndarray,                # (nao_imp, nao_full) OR (nao_full, nao_imp)
+    X_k: np.ndarray,               # (nk, nao_full, nao_full)
+) -> tuple[np.ndarray, np.ndarray]:
     """
-    Transform impurity self-energy Σ_imp(iω) to lattice AO basis per k:
-      Σ_imp(w,s,p,q)  --UU-->  Σ_full_orth(w,s,i,j)  --X_k-->  Σ_AO(w,s,k,a,d)
-
-    Returns
-    -------
-    sigma_ao : (nomega, ns, nk, nao_full, nao_full)
+    Returns:
+      sigma_full_orth: (nomega, ns, nao_full, nao_full)
+      sigma_full_ao:   (nomega, ns, nk, nao_full, nao_full)
     """
-
     nomega, ns, nao_imp, _ = sigma_imp.shape
     nk, nao_full, _ = X_k.shape
 
-    # --- embed: Σ_full_orth = U^† Σ_imp U ---
-    # Two possible UU orientations. Try one; if it fails, use the other.
+    # --- embed impurity -> full orth: U^† Σ_imp U ---
+    # try both UU orientations
     try:
-        # UU indexed as (p,i): (nao_imp, nao_full)
+        # UU: (p,i)
         sigma_full_orth = np.einsum(
             "pi, wspq, qj -> wsij",
             uu.conj(), sigma_imp, uu,
             optimize=True
         )
     except ValueError:
-        # UU indexed as (i,p): (nao_full, nao_imp)
+        # UU: (i,p)
         sigma_full_orth = np.einsum(
             "ip, wspq, jq -> wsij",
             uu.conj(), sigma_imp, uu,
             optimize=True
         )
 
-    # --- rotate to AO(k): Σ_AO(k) = X_k Σ_orth X_k^† ---
-    sigma_ao = np.zeros((nomega, ns, nk, nao_full, nao_full), dtype=np.complex128)
+    # --- rotate orth -> AO(k) ---
+    sigma_full_ao = np.zeros((nomega, ns, nk, nao_full, nao_full), dtype=np.complex128)
     for w in range(nomega):
         for s in range(ns):
-            sigma_ao[w, s] = np.einsum(
+            sigma_full_ao[w, s] = np.einsum(
                 "kab, bc, kdc -> kad",
                 X_k, sigma_full_orth[w, s], X_k.conj(),
                 optimize=True
             )
-    return sigma_ao
+
+    return sigma_full_orth, sigma_full_ao
 
 
 
 
 
 
+def insert_sigma_into_seet_file(
+    *,
+    results_file: Path,
+    iteration: int,
+    sigma_add_ao: np.ndarray,   # (nomega, ns, nk, nao_full, nao_full)
+    mixing: float,
+):
+    with h5py.File(results_file, "r+") as fs:
+        group = fs[f"iter{iteration}/Selfenergy"]
+        sigma_in = group["data"][()]
+
+        if sigma_in.shape != sigma_add_ao.shape:
+            raise ValueError(f"Shape mismatch: SEET {sigma_in.shape} vs add {sigma_add_ao.shape}")
+
+        sigma_in += mixing * sigma_add_ao
+        group["data"][...] = sigma_in
 
 
 
