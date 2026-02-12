@@ -1,6 +1,3 @@
-import argparse
-import time
-import re
 from pathlib import Path
 import numpy as np
 import h5py
@@ -78,6 +75,7 @@ def insert_sigma_into_seet_file(
 
 
 def main():
+<<<<<<< HEAD
     # 1) Reuse the processing script's argument parser
     ap = proc.build_argparser()
 
@@ -102,6 +100,82 @@ def main():
     with h5py.File(args.transform_file, "r") as ft:
         X_k = ft["X_k"][()]
         uu = ft[f"{args.impurity_index}/UU"][()] + 0j
+=======
+    # 1️⃣ Start from the processing script's parser
+    ap = proc.build_argparser()
+
+    # 2️⃣ Add SEET-specific arguments
+    ap.add_argument("--transform-file", type=Path, required=True,
+                    help="Path to transform.h5 containing X_k and UU")
+    ap.add_argument("--results-file", type=Path, required=True,
+                    help="SEET results HDF5 file to update")
+    ap.add_argument("--iteration", type=int, required=True,
+                    help="SEET iteration index (iter{iteration}/Selfenergy)")
+    ap.add_argument("--impurity-index", type=int, default=0,
+                    help="Which impurity block to use from transform file")
+    ap.add_argument("--mixing", type=float, default=0.5,
+                    help="Mixing parameter for updating selfenergy")
+    ap.add_argument("--save-full-sigma", type=Path, default=None,
+                    help="Optional: save full-space sigma for debugging")
+
+    args = ap.parse_args()
+
+    # 3️⃣ Run the processing script to compute impurity Σ(iω)
+    sigma_imp = proc.run_processing(args)
+    # sigma_imp shape: (nomega, ns, nao_imp, nao_imp)
+
+    # 4️⃣ Load transformation matrices
+    with h5py.File(args.transform_file, "r") as ft:
+        X_k = ft["X_k"][()]
+        UU = ft[f"{args.impurity_index}/UU"][()] + 0j
+
+    # 5️⃣ Build full-space sigma
+    nomega, ns, nao_imp, _ = sigma_imp.shape
+    nk, nao_full, _ = X_k.shape
+
+    try:
+        sigma_full_orth = np.einsum(
+            "pi, wspq, qj -> wsij",
+            UU.conj(), sigma_imp, UU,
+            optimize=True
+        )
+    except ValueError:
+        sigma_full_orth = np.einsum(
+            "ip, wspq, jq -> wsij",
+            UU.conj(), sigma_imp, UU,
+            optimize=True
+        )
+
+    sigma_full_ao = np.zeros((nomega, ns, nk, nao_full, nao_full), dtype=np.complex128)
+
+    for w in range(nomega):
+        for s in range(ns):
+            sigma_full_ao[w, s] = np.einsum(
+                "kab, bc, kdc -> kad",
+                X_k, sigma_full_orth[w, s], X_k.conj(),
+                optimize=True
+            )
+
+    # 6️⃣ Optionally save full-space sigma
+    if args.save_full_sigma is not None:
+        with h5py.File(args.save_full_sigma, "w") as f:
+            f.create_dataset("Sigma_imp_iw", data=sigma_imp)
+            f.create_dataset("Sigma_full_orth_iw", data=sigma_full_orth)
+            f.create_dataset("Sigma_full_ao_iw", data=sigma_full_ao)
+
+    # 7️⃣ Insert into SEET results file
+    with h5py.File(args.results_file, "r+") as fs:
+        group = fs[f"iter{args.iteration}/Selfenergy"]
+        sigma_in = group["data"][()]
+
+        if sigma_in.shape != sigma_full_ao.shape:
+            raise ValueError(
+                f"Shape mismatch: SEET {sigma_in.shape} vs computed {sigma_full_ao.shape}"
+            )
+
+        sigma_in += args.mixing * sigma_full_ao
+        group["data"][...] = sigma_in
+>>>>>>> 4431cec (save)
 
     # 5) Build full-space sigma
     sigma_full_orth, sigma_full_ao = build_full_space_sigma_from_impurity(
@@ -117,6 +191,7 @@ def main():
             f.create_dataset("Sigma_full_orth_iw", data=sigma_full_orth)
             f.create_dataset("Sigma_full_ao_iw", data=sigma_full_ao)
 
+<<<<<<< HEAD
     # 7) Insert into SEET file using mixing already in args
     insert_sigma_into_seet_file(
         results_file=args.results_file,
@@ -124,3 +199,7 @@ def main():
         sigma_add_ao=sigma_full_ao,
         mixing=args.mixing
     )
+=======
+if __name__ == "__main__":
+    main()
+>>>>>>> 4431cec (save)
