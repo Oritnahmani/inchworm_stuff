@@ -120,15 +120,15 @@ def main():
 
     args = ap.parse_args()
 
-    # 3️⃣ Run the processing script to compute impurity Σ(iω)
-    sigma_imp = proc.run_processing(args)
-    # sigma_imp shape: (nomega, ns, nao_imp, nao_imp)
+# 1) impurity sigma
+    sigma_imp = proc.run_processing(args)   # (nomega, ns, nao_imp, nao_imp)
 
-    # 4️⃣ Load transformation matrices
+    # 2) load transforms
     with h5py.File(args.transform_file, "r") as ft:
         X_k = ft["X_k"][()]
         UU = ft[f"{args.impurity_index}/UU"][()] + 0j
 
+<<<<<<< HEAD
     # 5️⃣ Build full-space sigma
     nomega, ns, nao_imp, _ = sigma_imp.shape
     nk, nao_full, _ = X_k.shape
@@ -182,6 +182,20 @@ def main():
         sigma_imp=sigma_imp,
         uu=uu,
         X_k=X_k
+=======
+    sigma_full_orth, sigma_full_ao = build_full_space_sigma_from_impurity(
+    sigma_imp=sigma_imp,
+    uu=UU,
+    X_k=X_k
+)
+
+    # 5) insert/update SEET
+    insert_sigma_into_seet_file(
+        results_file=args.results_file,
+        iteration=args.iteration,
+        sigma_add_ao=sigma_full_ao,
+        mixing=args.mixing
+>>>>>>> 1ca01af (save)
     )
 
     # 6) Optional: save “whole space” sigma for debugging
