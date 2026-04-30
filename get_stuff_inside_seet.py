@@ -145,31 +145,6 @@ def rotate_dynamic_orth_to_ao_k(*, sigma_full_orth: np.ndarray, X_k: np.ndarray)
     return sigma_full_ao
 
 
-def rotate_static_orth_to_ao_k(*, sigma_inf_full_orth: np.ndarray, X_k: np.ndarray):
-    """
-    Rotate static Sigma1 from orthogonal basis to AO basis per k-point.
-
-    sigma_inf_full_orth: (ns, nao_full, nao_full)
-    X_k:                 (nk, nao_full, nao_full)
-
-    returns:
-    sigma_inf_full_ao:   (ns, nk, nao_full, nao_full)
-    """
-    ns, nao_full, _ = sigma_inf_full_orth.shape
-    nk, nao_full2, _ = X_k.shape
-    if nao_full != nao_full2:
-        raise ValueError(f"nao_full mismatch: sigma_inf has {nao_full}, X_k has {nao_full2}")
-
-    X_k_H = X_k.conj().transpose(0, 2, 1)
-    return np.einsum(
-        "kab, sbc, kcd -> skad",
-        X_k,
-        sigma_inf_full_orth,
-        X_k_H,
-        optimize=True,
-    )
-
-
 def insert_sigma_into_seet_file(
     *,
     results_file: Path,
@@ -179,54 +154,59 @@ def insert_sigma_into_seet_file(
     mixing: float,
 ):
     """
-    Update iter{iteration}/Selfenergy/data and iter{iteration}/Sigma1.
-    If iter{iteration} does not exist, initialize it by copying iter{iteration-1}.
+    Update the existing iter{iteration}/Selfenergy/data and iter{iteration}/Sigma1.
+
+    This does NOT create a new iteration.
+    It only modifies the iteration passed through the --iteration argument.
     """
     with h5py.File(results_file, "r+") as fs:
-        new_iter_key = f"iter{iteration}"
-        prev_iter_key = f"iter{iteration - 1}"
+        iter_key = f"iter{iteration}"
 
-        if new_iter_key not in fs:
-            if prev_iter_key not in fs:
-                raise KeyError(
-                    f"{new_iter_key} not found, and cannot initialize it because {prev_iter_key} is also missing."
-                )
-
-            prev_group = fs[prev_iter_key]
-            new_group = fs.create_group(new_iter_key)
-
-            # copy everything from previous iteration into the new one
-            for name in prev_group.keys():
-                prev_group.copy(name, new_group, name=name)
-
-            # update the top-level current-iteration marker if present
-            if "iter" in fs:
-                fs["iter"][...] = iteration
-
-        sigma_group = fs[f"{new_iter_key}/Selfenergy"]
-        sigma_in = sigma_group["data"][()]
-        sigma_inf_in = fs[f"{new_iter_key}/Sigma1"][()]
-
-        if sigma_in.shape != sigma_add_ao.shape:
-            raise ValueError(
-                f"Dynamic sigma shape mismatch: SEET {sigma_in.shape} vs add {sigma_add_ao.shape}"
-            )
-        if sigma_inf_in.shape != sigma_inf_add_ao.shape:
-            raise ValueError(
-                f"Static sigma shape mismatch: SEET {sigma_inf_in.shape} vs add {sigma_inf_add_ao.shape}"
+        if iter_key not in fs:
+            raise KeyError(
+                f"{iter_key} not found in {results_file}. "
+                f"This function only updates an existing iteration; it does not create a new one."
             )
 
-        sigma_group["data"][...] = sigma_in + mixing * sigma_add_ao
-        fs[f"{new_iter_key}/Sigma1"][...] = sigma_inf_in + mixing * sigma_inf_add_ao
+        sigma_path = f"{iter_key}/Selfenergy/data"
+        sigma_inf_path = f"{iter_key}/Sigma1"
+
+        if sigma_path not in fs:
+            raise KeyError(f"Missing dataset: {sigma_path}")
+
+        if sigma_inf_path not in fs:
+            raise KeyError(f"Missing dataset: {sigma_inf_path}")
+
+        sigma_ds = fs[sigma_path]
+        sigma_inf_ds = fs[sigma_inf_path]
+
+        if sigma_ds.shape != sigma_add_ao.shape:
+            raise ValueError(
+                f"Dynamic sigma shape mismatch: SEET {sigma_ds.shape} vs add {sigma_add_ao.shape}"
+            )
+
+        if sigma_inf_ds.shape != sigma_inf_add_ao.shape:
+            raise ValueError(
+                f"Static sigma shape mismatch: SEET {sigma_inf_ds.shape} vs add {sigma_inf_add_ao.shape}"
+            )
+
+        sigma_ds[...] = sigma_ds[()] + mixing * sigma_add_ao
+        sigma_inf_ds[...] = sigma_inf_ds[()] + mixing * sigma_inf_add_ao
 
 
-def main():
-    ap = proc.build_argparser()
-    ap.add_argument("--transform-file", type=Path, required=True)
-    ap.add_argument("--results-file", type=Path, required=True)
-    ap.add_argument("--iteration", type=int, required=True)
-    ap.add_argument("--mixing", type=float, default=0.5)
-    ap.add_argument("--save-full-sigma", type=Path, default=None)
+
+def main(): 
+    ap.add_argument("--transform-file", type=Path, required=True,
+                    help="Path to transform.h5 (contains nimp, X_k, UU)")
+    ap.add_argument("--results-file", type=Path, required=True,
+                    help="SEET results HDF5 file to update")
+    ap.add_argument("--iteration", type=int, required=True,
+                    help="SEET iteration index to update (iter{iteration}/Selfenergy)")
+    ap.add_argument("--impurity-index", type=int, default=0,
+                    help="Which impurity block in transform.h5 to use")
+    ap.add_argument("--save-full-sigma", type=Path, default=None,
+                    help="Optional: save Sigma_full_orth and Sigma_full_ao here")
+
     args = ap.parse_args()
 
     sigma_imp_all, sigma_inf_all = proc.run_processing(args)
