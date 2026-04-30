@@ -1,219 +1,285 @@
 from pathlib import Path
 import numpy as np
 import h5py
-import data_analyzing_from_inchworm.processing_after_inchworm as proc
+from data_analyzing_from_inchworm import processing_after_inchworm as proc
 
 
+def load_transform_data_ibz(transform_file: Path, input_file: Path):
+    with h5py.File(transform_file, "r") as ft:
+        nimp = int(ft["nimp"][()])
+        X_inv_k_full = ft["X_inv_k"][()]
+        uu_trans = [(ft[f"{i}/UU"][()] + 0j) for i in range(nimp)]
 
-def build_full_space_sigma_from_impurity(
+    with h5py.File(input_file, "r") as fin:
+        ir_list = fin["grid/ir_list"][()]
+
+    X_inv_k_ibz = X_inv_k_full[ir_list]
+    return nimp, uu_trans, X_inv_k_ibz
+
+
+def embed_all_impurities_to_full_orth(
     *,
-    sigma_imp: np.ndarray,         # (nomega, ns, nao_imp, nao_imp)
-    uu: np.ndarray,                # (nao_imp, nao_full) OR (nao_full, nao_imp)
-    X_k: np.ndarray,               # (nk, nao_full, nao_full)
-) -> tuple[np.ndarray, np.ndarray]:
+    sigma_imp_list,   # list of arrays, each (ntau, ns, nao_imp_i, nao_imp_i)
+    uu_trans,         # list of arrays, one per impurity
+):
     """
-    Returns:
-      sigma_full_orth: (nomega, ns, nao_full, nao_full)
-      sigma_full_ao:   (nomega, ns, nk, nao_full, nao_full)
-    """
-    nomega, ns, nao_imp, _ = sigma_imp.shape
-    nk, nao_full, _ = X_k.shape
+    Embed all impurity dynamic self-energies into the full orthogonal space and sum them.
 
-    # --- embed impurity -> full orth: U^† Σ_imp U ---
-    # try both UU orientations
-    try:
-        # UU: (p,i)
-        sigma_full_orth = np.einsum(
-            "pi, wspq, qj -> wsij",
-            uu.conj(), sigma_imp, uu,
-            optimize=True
-        )
-    except ValueError:
-        # UU: (i,p)
-        sigma_full_orth = np.einsum(
-            "ip, wspq, jq -> wsij",
-            uu.conj(), sigma_imp, uu,
-            optimize=True
+    Returns
+    -------
+    sigma_full_orth : np.ndarray
+        Shape (ntau, ns, nao_full, nao_full)
+    """
+    if len(sigma_imp_list) != len(uu_trans):
+        raise ValueError(
+            f"Need one sigma per impurity: got {len(sigma_imp_list)} sigmas and {len(uu_trans)} UU blocks."
         )
 
-    # --- rotate orth -> AO(k) ---
-    sigma_full_ao = np.zeros((nomega, ns, nk, nao_full, nao_full), dtype=np.complex128)
-    for w in range(nomega):
-        for s in range(ns):
-            sigma_full_ao[w, s] = np.einsum(
-                "kab, bc, kdc -> kad",
-                X_k, sigma_full_orth[w, s], X_k.conj(),
-                optimize=True
+    # Infer output size from first projector and first sigma
+    sigma0 = sigma_imp_list[0]
+    ntau, ns = sigma0.shape[:2]
+
+    # Figure out nao_full from UU orientation
+    uu0 = uu_trans[0]
+    nao_full = max(uu0.shape)
+
+    sigma_full_orth = np.zeros((ntau, ns, nao_full, nao_full), dtype=np.complex128)
+
+    for sigma_imp, uu in zip(sigma_imp_list, uu_trans):
+        # sigma_imp: (w, s, p, q)
+        try:
+            # UU: (p, i)
+            sigma_full_orth += np.einsum(
+                "pi, wspq, qj -> wsij",
+                uu.conj(),
+                sigma_imp,
+                uu,
+                optimize=True,
+            )
+        except ValueError:
+            # UU: (i, p)
+            sigma_full_orth += np.einsum(
+                "ip, wspq, jq -> wsij",
+                uu.conj(),
+                sigma_imp,
+                uu,
+                optimize=True,
             )
 
-    return sigma_full_orth, sigma_full_ao
+    return sigma_full_orth
 
 
+def embed_all_sigma_inf_to_full_orth(
+    *,
+    sigma_inf_list,   # list of arrays, each (ns, nao_imp_i, nao_imp_i)
+    uu_trans,         # list of arrays
+):
+    """
+    Embed all impurity static self-energies Sigma1 into the full orthogonal space and sum them.
+
+    Returns
+    -------
+    sigma_inf_full_orth : np.ndarray
+        Shape (ns, nao_full, nao_full)
+    """
+    if len(sigma_inf_list) != len(uu_trans):
+        raise ValueError(
+            f"Need one sigma_inf per impurity: got {len(sigma_inf_list)} static blocks and {len(uu_trans)} UU blocks."
+        )
+
+    ns = sigma_inf_list[0].shape[0]
+    uu0 = uu_trans[0]
+    nao_full = max(uu0.shape)
+
+    sigma_inf_full_orth = np.zeros((ns, nao_full, nao_full), dtype=np.complex128)
+
+    for sigma_inf, uu in zip(sigma_inf_list, uu_trans):
+        try:
+            # UU: (p, i)
+            sigma_inf_full_orth += np.einsum(
+                "pi, spq, qj -> sij",
+                uu.conj(),
+                sigma_inf,
+                uu,
+                optimize=True,
+            )
+        except ValueError:
+            # UU: (i, p)
+            sigma_inf_full_orth += np.einsum(
+                "ip, spq, jq -> sij",
+                uu.conj(),
+                sigma_inf,
+                uu,
+                optimize=True,
+            )
+
+    return sigma_inf_full_orth
 
 
+def rotate_dynamic_orth_to_ao_k(*, sigma_full_orth: np.ndarray, X_k: np.ndarray):
+    """
+    Rotate dynamic sigma from orthogonal basis to AO basis per k-point.
+
+    sigma_full_orth: (ntau, ns, nao_full, nao_full)
+    X_k:             (nk, nao_full, nao_full)
+
+    returns:
+    sigma_full_ao:   (ntau, ns, nk, nao_full, nao_full)
+    """
+    ntau, ns, nao_full, _ = sigma_full_orth.shape
+    nk, nao_full2, _ = X_k.shape
+    if nao_full != nao_full2:
+        raise ValueError(f"nao_full mismatch: sigma has {nao_full}, X_k has {nao_full2}")
+
+    X_k_H = X_k.conj().transpose(0, 2, 1)
+
+    sigma_full_ao = np.zeros((ntau, ns, nk, nao_full, nao_full), dtype=np.complex128)
+    for w in range(ntau):
+        sigma_full_ao[w] = np.einsum(
+            "kab, sbc, kcd -> skad",
+            X_k,
+            sigma_full_orth[w],
+            X_k_H,
+            optimize=True,
+        )
+    return sigma_full_ao
+
+
+def rotate_static_orth_to_ao_k(*, sigma_inf_full_orth: np.ndarray, X_k: np.ndarray):
+    """
+    Rotate static Sigma1 from orthogonal basis to AO basis per k-point.
+
+    sigma_inf_full_orth: (ns, nao_full, nao_full)
+    X_k:                 (nk, nao_full, nao_full)
+
+    returns:
+    sigma_inf_full_ao:   (ns, nk, nao_full, nao_full)
+    """
+    ns, nao_full, _ = sigma_inf_full_orth.shape
+    nk, nao_full2, _ = X_k.shape
+    if nao_full != nao_full2:
+        raise ValueError(f"nao_full mismatch: sigma_inf has {nao_full}, X_k has {nao_full2}")
+
+    X_k_H = X_k.conj().transpose(0, 2, 1)
+    return np.einsum(
+        "kab, sbc, kcd -> skad",
+        X_k,
+        sigma_inf_full_orth,
+        X_k_H,
+        optimize=True,
+    )
 
 
 def insert_sigma_into_seet_file(
     *,
     results_file: Path,
     iteration: int,
-    sigma_add_ao: np.ndarray,   # (nomega, ns, nk, nao_full, nao_full)
+    sigma_add_ao: np.ndarray,       # (ntau, ns, nk, nao_full, nao_full)
+    sigma_inf_add_ao: np.ndarray,   # (ns, nk, nao_full, nao_full)
     mixing: float,
 ):
+    """
+    Update iter{iteration}/Selfenergy/data and iter{iteration}/Sigma1.
+    If iter{iteration} does not exist, initialize it by copying iter{iteration-1}.
+    """
     with h5py.File(results_file, "r+") as fs:
-        group = fs[f"iter{iteration}/Selfenergy"]
-        sigma_in = group["data"][()]
+        new_iter_key = f"iter{iteration}"
+        prev_iter_key = f"iter{iteration - 1}"
+
+        if new_iter_key not in fs:
+            if prev_iter_key not in fs:
+                raise KeyError(
+                    f"{new_iter_key} not found, and cannot initialize it because {prev_iter_key} is also missing."
+                )
+
+            prev_group = fs[prev_iter_key]
+            new_group = fs.create_group(new_iter_key)
+
+            # copy everything from previous iteration into the new one
+            for name in prev_group.keys():
+                prev_group.copy(name, new_group, name=name)
+
+            # update the top-level current-iteration marker if present
+            if "iter" in fs:
+                fs["iter"][...] = iteration
+
+        sigma_group = fs[f"{new_iter_key}/Selfenergy"]
+        sigma_in = sigma_group["data"][()]
+        sigma_inf_in = fs[f"{new_iter_key}/Sigma1"][()]
 
         if sigma_in.shape != sigma_add_ao.shape:
-            raise ValueError(f"Shape mismatch: SEET {sigma_in.shape} vs add {sigma_add_ao.shape}")
+            raise ValueError(
+                f"Dynamic sigma shape mismatch: SEET {sigma_in.shape} vs add {sigma_add_ao.shape}"
+            )
+        if sigma_inf_in.shape != sigma_inf_add_ao.shape:
+            raise ValueError(
+                f"Static sigma shape mismatch: SEET {sigma_inf_in.shape} vs add {sigma_inf_add_ao.shape}"
+            )
 
-        sigma_in += mixing * sigma_add_ao
-        group["data"][...] = sigma_in
-
-
-
+        sigma_group["data"][...] = sigma_in + mixing * sigma_add_ao
+        fs[f"{new_iter_key}/Sigma1"][...] = sigma_inf_in + mixing * sigma_inf_add_ao
 
 
 def main():
-<<<<<<< HEAD
-    # 1) Reuse the processing script's argument parser
     ap = proc.build_argparser()
-
-    # 2) Add SEET-specific arguments
-    ap.add_argument("--transform-file", type=Path, required=True,
-                    help="Path to transform.h5 (contains nimp, X_k, UU)")
-    ap.add_argument("--results-file", type=Path, required=True,
-                    help="SEET results HDF5 file to update")
-    ap.add_argument("--iteration", type=int, required=True,
-                    help="SEET iteration index to update (iter{iteration}/Selfenergy)")
-    ap.add_argument("--impurity-index", type=int, default=0,
-                    help="Which impurity block in transform.h5 to use")
-    ap.add_argument("--save-full-sigma", type=Path, default=None,
-                    help="Optional: save Sigma_full_orth and Sigma_full_ao here")
-
+    ap.add_argument("--transform-file", type=Path, required=True)
+    ap.add_argument("--results-file", type=Path, required=True)
+    ap.add_argument("--iteration", type=int, required=True)
+    ap.add_argument("--mixing", type=float, default=0.5)
+    ap.add_argument("--save-full-sigma", type=Path, default=None)
     args = ap.parse_args()
 
-    # 3) Run inchworm post-processing using the other script
-    sigma_imp = proc.run_processing(args)   # (nomega, ns, nao_imp, nao_imp)
+    sigma_imp_all, sigma_inf_all = proc.run_processing(args)
 
-    # 4) Load transformation matrices
-    with h5py.File(args.transform_file, "r") as ft:
-        X_k = ft["X_k"][()]
-        uu = ft[f"{args.impurity_index}/UU"][()] + 0j
-=======
-    # 1️⃣ Start from the processing script's parser
-    ap = proc.build_argparser()
+    sigma_imp_list = [sigma_imp_all[i] for i in range(sigma_imp_all.shape[0])]
+    sigma_inf_list = [sigma_inf_all[i] for i in range(sigma_inf_all.shape[0])]
 
-    # 2️⃣ Add SEET-specific arguments
-    ap.add_argument("--transform-file", type=Path, required=True,
-                    help="Path to transform.h5 containing X_k and UU")
-    ap.add_argument("--results-file", type=Path, required=True,
-                    help="SEET results HDF5 file to update")
-    ap.add_argument("--iteration", type=int, required=True,
-                    help="SEET iteration index (iter{iteration}/Selfenergy)")
-    ap.add_argument("--impurity-index", type=int, default=0,
-                    help="Which impurity block to use from transform file")
-    ap.add_argument("--mixing", type=float, default=0.5,
-                    help="Mixing parameter for updating selfenergy")
-    ap.add_argument("--save-full-sigma", type=Path, default=None,
-                    help="Optional: save full-space sigma for debugging")
+    nimp, uu_trans, X_k = load_transform_data_ibz(
+        args.transform_file,
+        args.input_h5,
+    )
 
-    args = ap.parse_args()
-
-# 1) impurity sigma
-    sigma_imp = proc.run_processing(args)   # (nomega, ns, nao_imp, nao_imp)
-
-    # 2) load transforms
-    with h5py.File(args.transform_file, "r") as ft:
-        X_k = ft["X_k"][()]
-        UU = ft[f"{args.impurity_index}/UU"][()] + 0j
-
-<<<<<<< HEAD
-    # 5️⃣ Build full-space sigma
-    nomega, ns, nao_imp, _ = sigma_imp.shape
-    nk, nao_full, _ = X_k.shape
-
-    try:
-        sigma_full_orth = np.einsum(
-            "pi, wspq, qj -> wsij",
-            UU.conj(), sigma_imp, UU,
-            optimize=True
-        )
-    except ValueError:
-        sigma_full_orth = np.einsum(
-            "ip, wspq, jq -> wsij",
-            UU.conj(), sigma_imp, UU,
-            optimize=True
+    if len(sigma_imp_list) != nimp:
+        raise ValueError(
+            f"transform.h5 says nimp={nimp}, but processing returned "
+            f"{len(sigma_imp_list)} impurity blocks"
         )
 
-    sigma_full_ao = np.zeros((nomega, ns, nk, nao_full, nao_full), dtype=np.complex128)
+    sigma_full_orth = embed_all_impurities_to_full_orth(
+        sigma_imp_list=sigma_imp_list,
+        uu_trans=uu_trans,
+    )
 
-    for w in range(nomega):
-        for s in range(ns):
-            sigma_full_ao[w, s] = np.einsum(
-                "kab, bc, kdc -> kad",
-                X_k, sigma_full_orth[w, s], X_k.conj(),
-                optimize=True
-            )
+    sigma_inf_full_orth = embed_all_sigma_inf_to_full_orth(
+        sigma_inf_list=sigma_inf_list,
+        uu_trans=uu_trans,
+    )
 
-    # 6️⃣ Optionally save full-space sigma
+    sigma_full_ao = rotate_dynamic_orth_to_ao_k(
+        sigma_full_orth=sigma_full_orth,
+        X_k=X_k,
+    )
+
+    sigma_inf_full_ao = rotate_static_orth_to_ao_k(
+        sigma_inf_full_orth=sigma_inf_full_orth,
+        X_k=X_k,
+    )
+
     if args.save_full_sigma is not None:
         with h5py.File(args.save_full_sigma, "w") as f:
-            f.create_dataset("Sigma_imp_iw", data=sigma_imp)
-            f.create_dataset("Sigma_full_orth_iw", data=sigma_full_orth)
-            f.create_dataset("Sigma_full_ao_iw", data=sigma_full_ao)
+            f.create_dataset("Sigma_full_orth_tau", data=sigma_full_orth)
+            f.create_dataset("Sigma_full_ao_tau", data=sigma_full_ao)
+            f.create_dataset("Sigma1_full_orth", data=sigma_inf_full_orth)
+            f.create_dataset("Sigma1_full_ao", data=sigma_inf_full_ao)
 
-    # 7️⃣ Insert into SEET results file
-    with h5py.File(args.results_file, "r+") as fs:
-        group = fs[f"iter{args.iteration}/Selfenergy"]
-        sigma_in = group["data"][()]
-
-        if sigma_in.shape != sigma_full_ao.shape:
-            raise ValueError(
-                f"Shape mismatch: SEET {sigma_in.shape} vs computed {sigma_full_ao.shape}"
-            )
-
-        sigma_in += args.mixing * sigma_full_ao
-        group["data"][...] = sigma_in
->>>>>>> 4431cec (save)
-
-    # 5) Build full-space sigma
-    sigma_full_orth, sigma_full_ao = build_full_space_sigma_from_impurity(
-        sigma_imp=sigma_imp,
-        uu=uu,
-        X_k=X_k
-=======
-    sigma_full_orth, sigma_full_ao = build_full_space_sigma_from_impurity(
-    sigma_imp=sigma_imp,
-    uu=UU,
-    X_k=X_k
-)
-
-    # 5) insert/update SEET
     insert_sigma_into_seet_file(
         results_file=args.results_file,
         iteration=args.iteration,
         sigma_add_ao=sigma_full_ao,
-        mixing=args.mixing
->>>>>>> 1ca01af (save)
+        sigma_inf_add_ao=sigma_inf_full_ao,
+        mixing=args.mixing,
     )
 
-    # 6) Optional: save “whole space” sigma for debugging
-    if args.save_full_sigma is not None:
-        with h5py.File(args.save_full_sigma, "w") as f:
-            f.create_dataset("Sigma_imp_iw", data=sigma_imp)
-            f.create_dataset("Sigma_full_orth_iw", data=sigma_full_orth)
-            f.create_dataset("Sigma_full_ao_iw", data=sigma_full_ao)
 
-<<<<<<< HEAD
-    # 7) Insert into SEET file using mixing already in args
-    insert_sigma_into_seet_file(
-        results_file=args.results_file,
-        iteration=args.iteration,
-        sigma_add_ao=sigma_full_ao,
-        mixing=args.mixing
-    )
-=======
 if __name__ == "__main__":
     main()
->>>>>>> 4431cec (save)
