@@ -145,57 +145,93 @@ def rotate_dynamic_orth_to_ao_k(*, sigma_full_orth: np.ndarray, X_k: np.ndarray)
     return sigma_full_ao
 
 
+
+
+
+def rotate_dynamic_orth_to_ao_k(*, sigma_full_orth: np.ndarray, X_k: np.ndarray):
+    ntau, ns, nao_full, _ = sigma_full_orth.shape
+    nk, nao_full2, _ = X_k.shape
+    if nao_full != nao_full2:
+        raise ValueError(f"nao_full mismatch: sigma has {nao_full}, X_k has {nao_full2}")
+
+    X_k_H = X_k.conj().transpose(0, 2, 1)
+
+    sigma_full_ao = np.zeros((ntau, ns, nk, nao_full, nao_full), dtype=np.complex128)
+    for w in range(ntau):
+        sigma_full_ao[w] = np.einsum(
+            "kab, sbc, kcd -> skad",
+            X_k,
+            sigma_full_orth[w],
+            X_k_H,
+            optimize=True,
+        )
+    return sigma_full_ao
+
+
+def rotate_static_orth_to_ao_k(*, sigma_inf_full_orth: np.ndarray, X_k: np.ndarray):
+    """
+    Rotates static sigma from orthogonal basis to AO basis per k-point.
+    """
+    ns, nao_full, _ = sigma_inf_full_orth.shape
+    nk, _, _ = X_k.shape
+
+    X_k_H = X_k.conj().transpose(0, 2, 1)
+    sigma_inf_full_ao = np.zeros((ns, nk, nao_full, nao_full), dtype=np.complex128)
+    
+    sigma_inf_full_ao[...] = np.einsum(
+        "kab, sbc, kcd -> skad",
+        X_k,
+        sigma_inf_full_orth,
+        X_k_H,
+        optimize=True,
+    )
+    return sigma_inf_full_ao
+
+
 def insert_sigma_into_seet_file(
     *,
     results_file: Path,
     iteration: int,
-    sigma_add_ao: np.ndarray,       # (ntau, ns, nk, nao_full, nao_full)
-    sigma_inf_add_ao: np.ndarray,   # (ns, nk, nao_full, nao_full)
+    sigma_add_ao: np.ndarray,       
+    sigma_inf_add_ao: np.ndarray,   
     mixing: float,
 ):
     """
-    Update the existing iter{iteration}/Selfenergy/data and iter{iteration}/Sigma1.
-
-    This does NOT create a new iteration.
-    It only modifies the iteration passed through the --iteration argument.
+    Directly writes/rewrites the solver results into the current iter{iteration}.
+    If you are just starting and the iteration doesn't exist, it creates it dynamically.
     """
-    with h5py.File(results_file, "r+") as fs:
+    # Open in 'a' mode so it can read, write, or create groups if missing
+    with h5py.File(results_file, "a") as fs:
         iter_key = f"iter{iteration}"
 
+        # Create the iteration group if it's the first time running
         if iter_key not in fs:
-            raise KeyError(
-                f"{iter_key} not found in {results_file}. "
-                f"This function only updates an existing iteration; it does not create a new one."
-            )
+            print(f"Creating missing iteration group: {iter_key}")
+            iter_grp = fs.create_group(iter_key)
+        else:
+            iter_grp = fs[iter_key]
 
-        sigma_path = f"{iter_key}/Selfenergy/data"
-        sigma_inf_path = f"{iter_key}/Sigma1"
+        # Ensure the Selfenergy subgroup path exists
+        if "Selfenergy" not in iter_grp:
+            se_grp = iter_grp.create_group("Selfenergy")
+        else:
+            se_grp = iter_grp["Selfenergy"]
 
-        if sigma_path not in fs:
-            raise KeyError(f"Missing dataset: {sigma_path}")
+        # Helper function to completely rewrite/create a clean dataset
+        def rewrite_dataset(group, name, data):
+            if name in group:
+                del group[name]  # Wipe old data structure to avoid size mismatches
+            group.create_dataset(name, data=data)
 
-        if sigma_inf_path not in fs:
-            raise KeyError(f"Missing dataset: {sigma_inf_path}")
+        # Completely rewrite the solver outputs into the current iteration datasets
+        rewrite_dataset(se_grp, "data", sigma_add_ao)
+        rewrite_dataset(iter_grp, "Sigma1", sigma_inf_add_ao)
 
-        sigma_ds = fs[sigma_path]
-        sigma_inf_ds = fs[sigma_inf_path]
-
-        if sigma_ds.shape != sigma_add_ao.shape:
-            raise ValueError(
-                f"Dynamic sigma shape mismatch: SEET {sigma_ds.shape} vs add {sigma_add_ao.shape}"
-            )
-
-        if sigma_inf_ds.shape != sigma_inf_add_ao.shape:
-            raise ValueError(
-                f"Static sigma shape mismatch: SEET {sigma_inf_ds.shape} vs add {sigma_inf_add_ao.shape}"
-            )
-
-        sigma_ds[...] = sigma_ds[()] + mixing * sigma_add_ao
-        sigma_inf_ds[...] = sigma_inf_ds[()] + mixing * sigma_inf_add_ao
-
+    print(f"Successfully rewrote solver results into {results_file} -> {iter_key}")
 
 
 def main(): 
+    ap = argparse.ArgumentParser(description="Embed and rotate solver results back to main problem.")
     ap.add_argument("--transform-file", type=Path, required=True,
                     help="Path to transform.h5 (contains nimp, X_k, UU)")
     ap.add_argument("--results-file", type=Path, required=True,
